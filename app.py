@@ -74,6 +74,9 @@ def init_db() -> None:
     for column, ddl in (("worlds","TEXT NOT NULL DEFAULT '[]'"),("visible_to","TEXT NOT NULL DEFAULT 'all'")):
         if column not in {entry[1] for entry in con.execute("PRAGMA table_info(identities)")}:
             con.execute(f"ALTER TABLE identities ADD COLUMN {column} {ddl}")
+    if "mention_policy" not in {entry[1] for entry in con.execute("PRAGMA table_info(identities)")}:
+        con.execute("ALTER TABLE identities ADD COLUMN mention_policy TEXT NOT NULL DEFAULT 'all'")
+    con.execute("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, sender_id TEXT NOT NULL, room_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
     con.execute("CREATE TABLE IF NOT EXISTS moderation_actions (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL)")
     if "reporter_identity" not in {column[1] for column in con.execute("PRAGMA table_info(reports)")}:
@@ -147,6 +150,7 @@ class Hub:
                 continue
             item = dict(p)
             item["client_id"] = cid
+            item["current_room"] = next((room for room, members in self.room_members.items() if cid in members), None)
             result.append(item)
         return result
 
@@ -214,6 +218,23 @@ class Hub:
         rows = con.execute("SELECT f.requester_id,f.recipient_id,f.status,i.nickname FROM friendships f JOIN identities i ON i.id=CASE WHEN f.requester_id=? THEN f.recipient_id ELSE f.requester_id END WHERE f.requester_id=? OR f.recipient_id=? ORDER BY f.created_at DESC",(identity_id,identity_id,identity_id)).fetchall()
         con.close()
         return [{"identity_id":r["recipient_id"] if r["requester_id"]==identity_id else r["requester_id"],"nickname":r["nickname"],"status":r["status"],"incoming":r["recipient_id"]==identity_id} for r in rows]
+
+    def mentions(self, identity_id: str) -> list[dict[str, Any]]:
+        con = db()
+        rows = con.execute("SELECT m.id,m.sender_id,m.room_id,m.text,m.created_at,m.read_at,i.nickname FROM mentions m JOIN identities i ON i.id=m.sender_id WHERE m.recipient_id=? ORDER BY m.created_at DESC LIMIT 50",(identity_id,)).fetchall()
+        con.close()
+        return [dict(row) for row in rows]
+
+    def may_mention(self, sender_id: str, target_id: str) -> bool:
+        if sender_id == target_id or target_id not in self.profiles: return False
+        sender = self.profiles.get(sender_id)
+        target = self.profiles[target_id]
+        if not sender or target["mention_policy"] == "none": return False
+        con = db()
+        blocked = con.execute("SELECT 1 FROM identity_blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(sender["identity_id"],target["identity_id"],target["identity_id"],sender["identity_id"])).fetchone()
+        friends = con.execute("SELECT 1 FROM friendships WHERE status='accepted' AND ((requester_id=? AND recipient_id=?) OR (requester_id=? AND recipient_id=?))",(sender["identity_id"],target["identity_id"],target["identity_id"],sender["identity_id"])).fetchone()
+        con.close()
+        return not blocked and (target["mention_policy"] == "all" or bool(friends))
 
     def room_allowed(self, room_id: str, profile: dict[str, Any], password: str = "") -> tuple[bool, str]:
         con = db()
@@ -312,6 +333,30 @@ async def share_photo(photo_id: str, recipient_id: str, authorization: str | Non
         con.close(); raise HTTPException(404, "Photo or recipient unavailable")
     con.execute("INSERT OR IGNORE INTO photo_grants (photo_id,recipient_id) VALUES (?,?)",(photo_id,recipient_id))
     con.commit(); con.close()
+    return {"ok":True}
+
+
+@app.delete("/api/photos/{photo_id}/share/{recipient_id}")
+async def revoke_photo(photo_id: str, recipient_id: str, authorization: str | None = Header(default=None)):
+    owner_id = identity_from_header(authorization)
+    con = db()
+    owned = con.execute("SELECT 1 FROM photos WHERE id=? AND owner_id=?",(photo_id,owner_id)).fetchone()
+    if not owned: con.close(); raise HTTPException(404,"Photo unavailable")
+    con.execute("DELETE FROM photo_grants WHERE photo_id=? AND recipient_id=?",(photo_id,recipient_id))
+    con.commit();con.close()
+    return {"ok":True}
+
+
+@app.delete("/api/photos/{photo_id}")
+async def delete_photo(photo_id: str, authorization: str | None = Header(default=None)):
+    owner_id = identity_from_header(authorization)
+    con = db()
+    owned = con.execute("SELECT 1 FROM photos WHERE id=? AND owner_id=?",(photo_id,owner_id)).fetchone()
+    if not owned: con.close(); raise HTTPException(404,"Photo unavailable")
+    con.execute("DELETE FROM photo_grants WHERE photo_id=?",(photo_id,))
+    con.execute("DELETE FROM photos WHERE id=?",(photo_id,))
+    con.commit();con.close()
+    (UPLOAD_DIR / photo_id).unlink(missing_ok=True)
     return {"ok":True}
 
 
@@ -422,7 +467,7 @@ async def websocket_endpoint(ws: WebSocket):
                 token = str(data.get("identity_token") or "")
                 token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
                 con = db()
-                identity = con.execute("SELECT id,nickname,age,gender,description,dm_policy,worlds,visible_to FROM identities WHERE token_hash=?", (token_hash,)).fetchone() if token else None
+                identity = con.execute("SELECT id,nickname,age,gender,description,dm_policy,worlds,visible_to,mention_policy FROM identities WHERE token_hash=?", (token_hash,)).fetchone() if token else None
                 if identity:
                     identity_id = identity["id"]
                     nickname, age, gender = identity["nickname"], identity["age"], identity["gender"]
@@ -445,6 +490,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "description": identity["description"] if identity else "",
                     "worlds": json.loads(identity["worlds"]) if identity else [],
                     "visible_to": identity["visible_to"] if identity else "all",
+                    "mention_policy": identity["mention_policy"] if identity else "all",
                     "nickname": nickname,
                     "age": min(age, 99),
                     "gender": gender,
@@ -468,6 +514,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "identity_token": token,
                     "inbox": hub.inbox(identity_id),
                     "friends": hub.friendships(identity_id),
+                    "mentions": hub.mentions(identity_id),
                 })
                 await hub.broadcast_presence()
                 await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})
@@ -495,9 +542,11 @@ async def websocket_endpoint(ws: WebSocket):
                     if isinstance(worlds,list): p["worlds"] = [w for w in worlds if w in {"vanilla","kinky","soteh"}][:3]
                 if data.get("visible_to") in {"all","female","male","other"}:
                     p["visible_to"] = data["visible_to"]
+                if data.get("mention_policy") in {"all","friends","none"}:
+                    p["mention_policy"] = data["mention_policy"]
                 if p["dm_policy"] not in {"any","female","male","none"}: p["dm_policy"] = "any"
                 con = db()
-                con.execute("UPDATE identities SET dm_policy=?,description=?,worlds=?,visible_to=? WHERE id=?",(p["dm_policy"],p["description"],json.dumps(p["worlds"]),p["visible_to"],p["identity_id"]))
+                con.execute("UPDATE identities SET dm_policy=?,description=?,worlds=?,visible_to=?,mention_policy=? WHERE id=?",(p["dm_policy"],p["description"],json.dumps(p["worlds"]),p["visible_to"],p["mention_policy"],p["identity_id"]))
                 con.commit()
                 con.close()
                 await hub.broadcast_presence()
@@ -512,6 +561,7 @@ async def websocket_endpoint(ws: WebSocket):
                 reciprocal = con.execute("SELECT 1 FROM friendships WHERE requester_id=? AND recipient_id=? AND status!='rejected'",(target_identity,sender_identity)).fetchone()
                 if target and not blocked and not reciprocal:
                     con.execute("INSERT OR IGNORE INTO friendships (requester_id,recipient_id,status,created_at) VALUES (?,?,?,?)",(sender_identity,target_identity,"pending",time.time()))
+                    con.execute("UPDATE friendships SET status='pending',created_at=? WHERE requester_id=? AND recipient_id=? AND status='rejected'",(time.time(),sender_identity,target_identity))
                     con.commit()
                 con.close()
                 for identity in (target_identity,sender_identity):
@@ -532,6 +582,18 @@ async def websocket_endpoint(ws: WebSocket):
                         online = hub.identity_clients.get(identity)
                         if online: await hub.send(online,{"type":"friends","friends":hub.friendships(identity)})
 
+            elif mtype == "friend_remove":
+                other = str(data.get("identity_id", ""))
+                own = hub.identity_for(client_id)
+                con = db()
+                con.execute("DELETE FROM friendships WHERE (requester_id=? AND recipient_id=?) OR (requester_id=? AND recipient_id=?)",(own,other,other,own))
+                changed = con.total_changes
+                con.commit();con.close()
+                if changed:
+                    for identity in (own,other):
+                        online = hub.identity_clients.get(identity)
+                        if online: await hub.send(online,{"type":"friends","friends":hub.friendships(identity)})
+
             elif mtype == "conversation":
                 other_id = str(data.get("identity_id", ""))
                 identity_id = hub.identity_for(client_id)
@@ -546,6 +608,12 @@ async def websocket_endpoint(ws: WebSocket):
                     await hub.send(client_id,{"type":"conversation","identity_id":other_id,"messages":hub.conversation(identity_id,other_id),"inbox":hub.inbox(identity_id)})
                     if changed and (sender_client := hub.identity_clients.get(other_id)):
                         await hub.send(sender_client,{"type":"read_receipt","identity_id":identity_id,"messages":hub.conversation(other_id,identity_id)})
+
+            elif mtype == "read_mentions":
+                con = db()
+                con.execute("UPDATE mentions SET read_at=? WHERE recipient_id=? AND read_at IS NULL",(time.time(),hub.identity_for(client_id)))
+                con.commit();con.close()
+                await hub.send(client_id,{"type":"mentions","mentions":hub.mentions(hub.identity_for(client_id))})
 
             elif mtype == "typing":
                 target_identity = str(data.get("identity_id", ""))
@@ -566,6 +634,7 @@ async def websocket_endpoint(ws: WebSocket):
                     hub.room_members[room_id].add(client_id)
                 await hub.send(client_id, {"type": "joined_room", "room_id": room_id})
                 await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})
+                await hub.broadcast_presence()
 
             elif mtype == "room_message":
                 room_id = str(data.get("room_id", ""))
@@ -578,6 +647,15 @@ async def websocket_endpoint(ws: WebSocket):
                     permitted = con.execute("SELECT 1 FROM photos WHERE id=? AND owner_id=? AND visibility='public'",(photo_id,hub.identity_for(client_id))).fetchone()
                     con.close()
                     if not permitted: continue
+                requested = data.get("mentions",[])
+                if not isinstance(requested,list) or len(requested)>5:
+                    await hub.send(client_id,{"type":"error","message":"יותר מדי תיוגים"})
+                    continue
+                mention_ids = []
+                for identity in dict.fromkeys(str(item) for item in requested):
+                    target = hub.identity_clients.get(identity)
+                    if target and target in hub.room_members.get(room_id,set()) and hub.may_mention(client_id,target):
+                        mention_ids.append(identity)
                 payload = {
                     "type": "room_message",
                     "room_id": room_id,
@@ -587,10 +665,19 @@ async def websocket_endpoint(ws: WebSocket):
                         "profile": hub.profiles[client_id],
                         "text": text,
                         "photo_id": photo_id,
+                        "mentions": mention_ids,
                         "ts": time.time(),
                     },
                 }
                 await hub.broadcast(payload, list(hub.room_members[room_id]))
+                if mention_ids:
+                    con = db()
+                    for identity in mention_ids:
+                        con.execute("INSERT INTO mentions (id,recipient_id,sender_id,room_id,text,created_at) VALUES (?,?,?,?,?,?)",(str(uuid.uuid4()),identity,hub.identity_for(client_id),room_id,text,time.time()))
+                    con.commit();con.close()
+                    for identity in mention_ids:
+                        target = hub.identity_clients.get(identity)
+                        if target: await hub.send(target,{"type":"mentions","mentions":hub.mentions(identity)})
 
             elif mtype == "dm":
                 target_identity = str(data.get("identity_id", ""))

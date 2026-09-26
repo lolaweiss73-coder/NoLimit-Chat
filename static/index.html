@@ -55,6 +55,7 @@
         <button id="conversationMenuBtn" class="ghost hidden">⋮</button>
       </div>
       <div id="messages" class="messages"></div>
+      <div id="mentionSuggestions" class="list hidden"></div>
       <div class="composer">
         <textarea id="messageInput" rows="1" maxlength="4000" placeholder="הודעה"></textarea>
         <label class="ghost" title="העלאת תמונה לחדר">📷<input id="roomPhotoInput" type="file" accept="image/*" class="hidden" /></label>
@@ -69,6 +70,8 @@
       <div id="inboxList" class="list"></div>
       <div class="panel-head"><h2>חברים ובקשות</h2></div>
       <div id="friendsList" class="list"></div>
+      <div class="panel-head"><h2>תיוגים</h2></div>
+      <div id="mentionsList" class="list"></div>
       <div class="panel-head"><h2>מחוברים</h2></div>
       <div class="toolbar">
         <input id="userSearch" placeholder="חיפוש לפי כינוי" />
@@ -93,6 +96,7 @@
       <label>מי יכול לפנות אליי בפרטי<select id="dmPolicy"><option value="any">כולם</option><option value="female">נשים בלבד</option><option value="male">גברים בלבד</option><option value="none">אף אחד</option></select></label>
       <label>תיאור בפרופיל<textarea id="profileDescription" maxlength="500" rows="4"></textarea></label>
       <label>מי רואה אותי<select id="visibleTo"><option value="all">כולם</option><option value="female">נשים</option><option value="male">גברים</option><option value="other">אחר</option></select></label>
+      <label>מי יכול לתייג אותי<select id="mentionPolicy"><option value="all">כולם</option><option value="friends">חברים</option><option value="none">אף אחד</option></select></label>
       <div><span>העולמות שלי</span><label class="checkline"><input type="checkbox" name="world" value="vanilla" /> ונילה</label><label class="checkline"><input type="checkbox" name="world" value="kinky" /> קינקי</label><label class="checkline"><input type="checkbox" name="world" value="soteh" /> סוטה</label></div>
       <button id="saveProfileBtn" class="primary">שמור פרופיל</button>
       <label>תמונת פרופיל<input id="photoUpload" type="file" accept="image/*" /></label>

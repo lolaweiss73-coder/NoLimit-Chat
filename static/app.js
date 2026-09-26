@@ -2,7 +2,7 @@ const $ = (s) => document.querySelector(s);
 const state = {
   ws: null, clientId: null, self: null, users: [], rooms: [], active: {type:'room', id:'general'},
   messages: new Map(), ignored: new Set(JSON.parse(localStorage.getItem('ignoredUsers') || '[]')),
-  blocked: new Set(), dnd: false, inbox: [], friends: [],
+  blocked: new Set(), dnd: false, inbox: [], friends: [], mentions: [], composingMentions: [],
 };
 
 const labels = {
@@ -32,6 +32,10 @@ async function showPhotos(ownerId,targetId,shareTo){
       if(shareTo&&p.visibility==='private'){
         const button=document.createElement('button');button.textContent='שתף תמונה זו';button.className='ghost';
         button.onclick=async()=>{const result=await fetch(`/api/photos/${p.id}/share/${encodeURIComponent(shareTo)}`,{method:'POST',headers:authHeaders()});toast(result.ok?'התמונה שותפה':'השיתוף נכשל');};target.append(button);
+        const revoke=document.createElement('button');revoke.textContent='בטל שיתוף';revoke.className='ghost';revoke.onclick=async()=>{const result=await fetch(`/api/photos/${p.id}/share/${encodeURIComponent(shareTo)}`,{method:'DELETE',headers:authHeaders()});toast(result.ok?'השיתוף בוטל':'הביטול נכשל');};target.append(revoke);
+      }
+      if(ownerId===state.self?.identity_id&&!shareTo){
+        const remove=document.createElement('button');remove.textContent='מחק תמונה';remove.className='danger';remove.onclick=async()=>{if(!confirm('למחוק את התמונה?'))return;const result=await fetch('/api/photos/'+p.id,{method:'DELETE',headers:authHeaders()});if(result.ok)showPhotos(ownerId,targetId);};target.append(remove);
       }
     }
   }catch{target.textContent='לא ניתן לטעון תמונות';}
@@ -68,9 +72,9 @@ function send(payload){ if(state.ws?.readyState===WebSocket.OPEN) state.ws.send(
 function handle(m){
   if(m.type==='connected'){ state.clientId=m.client_id; $('#statusDot').classList.add('online'); }
   else if(m.type==='bootstrap'){
-    state.self=m.self; state.users=m.users; state.rooms=m.rooms; state.inbox=m.inbox||[]; state.friends=m.friends||[]; state.active={type:'room',id:m.active_room};
+    state.self=m.self; state.users=m.users; state.rooms=m.rooms; state.inbox=m.inbox||[]; state.friends=m.friends||[];state.mentions=m.mentions||[]; state.active={type:'room',id:m.active_room};
     localStorage.setItem('chatIdentityToken',m.identity_token);
-    $('#dmPolicy').value=state.self.dm_policy||'any'; $('#profileDescription').value=state.self.description||'';$('#visibleTo').value=state.self.visible_to||'all';document.querySelectorAll('[name=world]').forEach(el=>el.checked=(state.self.worlds||[]).includes(el.value));closeModal('gate'); renderAll();
+    $('#dmPolicy').value=state.self.dm_policy||'any'; $('#profileDescription').value=state.self.description||'';$('#visibleTo').value=state.self.visible_to||'all';$('#mentionPolicy').value=state.self.mention_policy||'all';document.querySelectorAll('[name=world]').forEach(el=>el.checked=(state.self.worlds||[]).includes(el.value));closeModal('gate'); renderAll();
   }
   else if(m.type==='presence'){ state.users=m.users; renderUsers(); renderInbox(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
   else if(m.type==='rooms'){ state.rooms=m.rooms; renderRooms(); }
@@ -91,18 +95,24 @@ function handle(m){
   else if(m.type==='read_receipt'){state.messages.set('dm:'+m.identity_id,m.messages);if(keyForActive()==='dm:'+m.identity_id)renderMessages();}
   else if(m.type==='typing'&&keyForActive()==='dm:'+m.identity_id){$('#conversationMeta').textContent='מקליד/ה...';setTimeout(()=>renderConversation(),1800);}
   else if(m.type==='friends'){state.friends=m.friends;renderFriends();}
+  else if(m.type==='mentions'){state.mentions=m.mentions;renderMentions();if(m.mentions.some(i=>!i.read_at))toast('תיוג חדש בחדר');}
   else if(m.type==='blocked'){ state.blocked.add(m.target_id); closeModal('userModal'); renderUsers(); toast('המשתמש נחסם'); }
   else if(m.type==='blocked_by'){ state.blocked.add(m.target_id); renderUsers(); if(state.active.type==='dm'&&state.active.id===m.target_id){state.active={type:'room',id:'general'};renderConversation();} toast('התקשורת עם משתמש נחסמה'); }
   else if(m.type==='report_received'){ toast('הדיווח התקבל'); closeModal('userModal'); }
   else if(m.type==='error'){ toast(m.message||'אירעה שגיאה'); }
 }
 
-function renderAll(){ renderRooms(); renderUsers(); renderInbox(); renderFriends(); renderConversation(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
+function renderAll(){ renderRooms(); renderUsers(); renderInbox(); renderFriends(); renderMentions(); renderConversation(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
+function renderMentions(){
+  $('#mentionsList').innerHTML=state.mentions.map(m=>`<div class="user-row" data-mentioned-room="${escapeHtml(m.room_id)}"><span>${escapeHtml(m.nickname)}: ${escapeHtml(m.text.slice(0,80))}</span>${!m.read_at?'<span class="badge">חדש</span>':''}</div>`).join('')||'<p class="muted" style="padding:12px">אין תיוגים.</p>';
+  document.querySelectorAll('[data-mentioned-room]').forEach(el=>el.onclick=()=>{joinRoom(el.dataset.mentionedRoom);send({type:'read_mentions'});});
+}
 function renderFriends(){
-  $('#friendsList').innerHTML=state.friends.filter(f=>f.status!=='rejected').map(f=>`<div class="user-row"><span>${escapeHtml(f.nickname)} · ${f.status==='accepted'?'חברים':f.incoming?'בקשה נכנסת':'בקשה נשלחה'}</span>${f.status==='pending'&&f.incoming?`<button class="primary" data-accept="${escapeHtml(f.identity_id)}">אישור</button><button class="ghost" data-reject="${escapeHtml(f.identity_id)}">דחייה</button>`:f.status==='accepted'?`<button class="ghost" data-friend-chat="${escapeHtml(f.identity_id)}">שיחה</button>`:''}</div>`).join('')||'<p class="muted" style="padding:12px">עדיין אין חברים.</p>';
+  $('#friendsList').innerHTML=state.friends.filter(f=>f.status!=='rejected').map(f=>`<div class="user-row"><span>${escapeHtml(f.nickname)} · ${f.status==='accepted'?'חברים':f.incoming?'בקשה נכנסת':'בקשה נשלחה'}</span>${f.status==='pending'&&f.incoming?`<button class="primary" data-accept="${escapeHtml(f.identity_id)}">אישור</button><button class="ghost" data-reject="${escapeHtml(f.identity_id)}">דחייה</button>`:f.status==='accepted'?`<button class="ghost" data-friend-chat="${escapeHtml(f.identity_id)}">שיחה</button>`:''}<button class="ghost" data-friend-remove="${escapeHtml(f.identity_id)}">הסר</button></div>`).join('')||'<p class="muted" style="padding:12px">עדיין אין חברים.</p>';
   document.querySelectorAll('[data-accept]').forEach(el=>el.onclick=()=>send({type:'friend_reply',identity_id:el.dataset.accept,accept:true}));
   document.querySelectorAll('[data-reject]').forEach(el=>el.onclick=()=>send({type:'friend_reply',identity_id:el.dataset.reject,accept:false}));
   document.querySelectorAll('[data-friend-chat]').forEach(el=>el.onclick=()=>openConversation(el.dataset.friendChat));
+  document.querySelectorAll('[data-friend-remove]').forEach(el=>el.onclick=()=>send({type:'friend_remove',identity_id:el.dataset.friendRemove}));
 }
 function renderInbox(){
   $('#inboxList').innerHTML=state.inbox.map(i=>`<div class="user-row" data-inbox="${escapeHtml(i.identity_id)}"><div class="row-main"><div class="row-title">${escapeHtml(i.nickname)}</div></div>${i.unread?`<span class="badge">${i.unread} חדשות</span>`:''}</div>`).join('')||'<p class="muted" style="padding:12px">עדיין אין הודעות.</p>';
@@ -149,6 +159,7 @@ function renderMessages(){
   $('#messages').scrollTop=$('#messages').scrollHeight;
 }
 function joinRoom(id){
+  state.composingMentions=[];$('#mentionSuggestions').classList.add('hidden');
   const r=state.rooms.find(x=>x.id===id); let password='';
   if(r?.is_private){ password=prompt('סיסמת החדר')||''; }
   send({type:'join_room',room_id:id,password});
@@ -176,16 +187,25 @@ $('#enterBtn').onclick=()=>{
   if($('#rememberMe').checked) localStorage.setItem('chatProfile',JSON.stringify(p)); else localStorage.removeItem('chatProfile');
   connect(p);
 };
-$('#sendBtn').onclick=()=>{const text=$('#messageInput').value.trim();if(!text)return;if(state.active.type==='room')send({type:'room_message',room_id:state.active.id,text});else send({type:'dm',identity_id:state.active.id,text});$('#messageInput').value='';};
+$('#sendBtn').onclick=()=>{const text=$('#messageInput').value.trim();if(!text)return;if(state.active.type==='room')send({type:'room_message',room_id:state.active.id,text,mentions:state.composingMentions.filter(m=>text.includes('@'+m.nickname)).map(m=>m.identity_id)});else send({type:'dm',identity_id:state.active.id,text});$('#messageInput').value='';state.composingMentions=[];$('#mentionSuggestions').classList.add('hidden');};
 $('#messageInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#sendBtn').click();}});
-let lastTyping=0;$('#messageInput').addEventListener('input',()=>{if(state.active.type==='dm'&&Date.now()-lastTyping>1500){send({type:'typing',identity_id:state.active.id});lastTyping=Date.now();}});
+let lastTyping=0;$('#messageInput').addEventListener('input',()=>{
+  if(state.active.type==='dm'&&Date.now()-lastTyping>1500){send({type:'typing',identity_id:state.active.id});lastTyping=Date.now();}
+  const input=$('#messageInput'),prefix=input.value.slice(0,input.selectionStart),match=state.active.type==='room'?prefix.match(/@([^\s@]{0,40})$/):null;
+  const suggestions=$('#mentionSuggestions');suggestions.replaceChildren();suggestions.classList.toggle('hidden',!match);
+  if(!match)return;
+  for(const user of state.users.filter(u=>u.client_id!==state.clientId&&u.current_room===state.active.id&&u.nickname.includes(match[1])).slice(0,6)){
+    const button=document.createElement('button');button.className='ghost';button.textContent=user.nickname;
+    button.onclick=()=>{const start=input.selectionStart-match[0].length;input.setRangeText('@'+user.nickname+' ',start,input.selectionStart,'end');state.composingMentions.push({identity_id:user.identity_id,nickname:user.nickname});suggestions.classList.add('hidden');input.focus();};suggestions.append(button);
+  }
+});
 $('#roomPhotoInput').onchange=async()=>{const file=$('#roomPhotoInput').files[0];if(!file||state.active.type!=='room')return;const form=new FormData();form.append('file',file);const response=await fetch('/api/photos?visibility=public',{method:'POST',headers:authHeaders(),body:form});if(response.ok){const photo=await response.json();send({type:'room_message',room_id:state.active.id,text:$('#messageInput').value.trim(),photo_id:photo.id});$('#messageInput').value='';}else toast('העלאת התמונה נכשלה');$('#roomPhotoInput').value='';};
 $('#contactCardBtn').onclick=()=>{if(state.active.type!=='dm'){toast('כרטיס קשר נשלח בשיחה פרטית');return;}const kind=prompt('סוג: phone, whatsapp, telegram, email, website');if(!['phone','whatsapp','telegram','email','website'].includes(kind))return;const value=prompt('פרט הקשר');if(value)send({type:'dm',identity_id:state.active.id,contact_card:{kind,value}});};
 $('#userSearch').oninput=renderUsers; $('#userSort').onchange=renderUsers;
 $('#worldFilter').onchange=renderUsers;
 $('#settingsBtn').onclick=()=>openModal('settingsModal');
 $('#dmPolicy').onchange=()=>send({type:'profile_update',dm_policy:$('#dmPolicy').value});
-$('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value,visible_to:$('#visibleTo').value,worlds:[...document.querySelectorAll('[name=world]:checked')].map(el=>el.value)});closeModal('settingsModal');};
+$('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value,visible_to:$('#visibleTo').value,mention_policy:$('#mentionPolicy').value,worlds:[...document.querySelectorAll('[name=world]:checked')].map(el=>el.value)});closeModal('settingsModal');};
 $('#uploadPhotoBtn').onclick=async()=>{const file=$('#photoUpload').files[0];if(!file)return;const form=new FormData();form.append('file',file);const result=await fetch('/api/photos?visibility='+$('#photoVisibility').value,{method:'POST',headers:authHeaders(),body:form});toast(result.ok?'התמונה עלתה':'העלאה נכשלה');if(result.ok)showPhotos(state.self.identity_id,'myPhotos');};
 $('#settingsBtn').onclick=()=>{openModal('settingsModal');if(state.self)showPhotos(state.self.identity_id,'myPhotos');};
 $('#dndBtn').onclick=()=>{state.dnd=!state.dnd;$('#dndBtn').textContent=`נא לא להפריע: ${state.dnd?'פעיל':'כבוי'}`;send({type:'profile_update',dnd:state.dnd});};

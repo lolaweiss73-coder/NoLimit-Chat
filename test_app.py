@@ -45,6 +45,35 @@ def test_message_rate_limit():
     assert not app.hub.allow_message('test-client')
     app.hub.message_times.pop('test-client')
 
+def test_mentions_respect_room_membership_and_block():
+    with client.websocket_connect('/ws') as sender:
+        sender.receive_json()
+        sender.send_json({'type':'hello','profile':{'nickname':'שולח','age':30,'gender':'male'}})
+        while (reply := sender.receive_json())['type'] != 'bootstrap': pass
+        sender_id=reply['self']['identity_id']
+        con=app.db()
+        con.execute("INSERT INTO identities (id,token_hash,nickname,age,gender,created_at) VALUES (?,?,?,?,?,?)",('tag-target','hash-for-test','מקבלת',30,'female',0))
+        con.commit();con.close()
+        app.hub.profiles['target-client']={'identity_id':'tag-target','nickname':'מקבלת','mention_policy':'all','gender':'female'}
+        app.hub.identity_clients['tag-target']='target-client'
+        app.hub.room_members['general'].add('target-client')
+        try:
+            sender.send_json({'type':'room_message','room_id':'general','text':'@מקבלת שלום','mentions':['tag-target']})
+            while (reply := sender.receive_json())['type'] != 'room_message': pass
+            assert reply['message']['mentions']==['tag-target']
+            con=app.db()
+            assert con.execute('SELECT COUNT(*) FROM mentions').fetchone()[0]==1
+            con.execute('INSERT INTO identity_blocks (blocker_id,blocked_id) VALUES (?,?)',(sender_id,'tag-target'))
+            con.commit();con.close()
+            sender.send_json({'type':'room_message','room_id':'general','text':'@מקבלת שוב','mentions':['tag-target']})
+            while (reply := sender.receive_json())['type'] != 'room_message': pass
+            assert reply['message']['mentions']==[]
+            con=app.db();assert con.execute('SELECT COUNT(*) FROM mentions').fetchone()[0]==1;con.close()
+        finally:
+            app.hub.profiles.pop('target-client',None)
+            app.hub.identity_clients.pop('tag-target',None)
+            app.hub.room_members['general'].discard('target-client')
+
 def test_private_room_rejects_wrong_password():
     import time
     con = app.db()
@@ -173,6 +202,10 @@ def test_private_photo_only_visible_after_grant():
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+owner_token}).status_code == 200
     assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 200
+    assert client.delete(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
+    assert client.delete(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+owner_token}).status_code == 200
+    assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
+    assert client.delete('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+owner_token}).status_code == 200
 
 def test_offline_message_respects_block_and_policy():
     with client.websocket_connect('/ws') as recipient:
