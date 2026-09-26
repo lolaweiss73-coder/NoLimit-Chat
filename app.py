@@ -5,6 +5,7 @@ import json
 import hashlib
 import secrets
 import io
+import os
 import sqlite3
 import time
 import uuid
@@ -18,9 +19,11 @@ from PIL import Image, UnidentifiedImageError
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "chat.db"
+DATA_DIR = Path(os.environ.get("CHAT_DATA_DIR", str(BASE_DIR))).expanduser().resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "chat.db"
 STATIC_DIR = BASE_DIR / "static"
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="No Limit Chat", version="0.1.1")

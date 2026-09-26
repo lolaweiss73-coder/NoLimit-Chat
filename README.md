@@ -48,6 +48,11 @@ Then open `http://127.0.0.1:8000`.
 ## Production notes
 Before public launch, add TLS, reverse proxy, rate limiting, abuse prevention, persistent identity/account option, moderation workflow, privacy/terms pages, backups, and a production database.
 
+## Persistent storage and backups
+Set `CHAT_DATA_DIR` to a mounted persistent directory before accepting real user data. The application stores `chat.db` and `uploads/` together there. If unset, both are stored next to the application code for local testing.
+
+Run `python backup_data.py --data-dir /path/to/persistent-data --output /safe/offsite/backup.zip` to create a consistent SQLite snapshot and archive its photos. Backups contain private messages and images; store them securely outside the application server. To restore while the service is stopped, extract `chat.db` and `uploads/` into an empty `CHAT_DATA_DIR` and restart. Test restoration before relying on backups.
+
 
 ## Render free deployment
 - Service type: Web Service
@@ -55,7 +60,7 @@ Before public launch, add TLS, reverse proxy, rate limiting, abuse prevention, p
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
 - Health check: `/api/health`
-- Free Render filesystem is ephemeral. This MVP can run there for testing; room/report SQLite persistence should move to a managed DB before production.
+- Free Render filesystem is ephemeral. It is suitable only for disposable testing. Set `CHAT_DATA_DIR` to durable storage before real users join; otherwise accounts, messages, photos, rooms and reports can disappear on redeploy or restart.
 
 
 ## One-click staging deploy

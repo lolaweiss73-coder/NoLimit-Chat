@@ -1,6 +1,8 @@
 import os
 import io
 import pytest
+import zipfile
+from backup_data import backup
 from PIL import Image
 from fastapi.testclient import TestClient
 import app
@@ -39,6 +41,20 @@ def test_private_room_rejects_wrong_password():
     profile={'age':30,'gender':'female','region':'all','relationship_status':'all'}
     assert app.hub.room_allowed('locked',profile,'wrong')[0] is False
     assert app.hub.room_allowed('locked',profile,'secret')[0] is True
+
+def test_backup_contains_database_and_photo(tmp_path):
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()
+        ws.send_json({'type':'hello','profile':{'nickname':'גיבוי','age':30,'gender':'female'}})
+        while (reply := ws.receive_json())['type'] != 'bootstrap': pass
+        token=reply['identity_token']
+    picture=io.BytesIO();Image.new('RGB',(8,8),'blue').save(picture,'PNG')
+    uploaded=client.post('/api/photos',files={'file':('image.png',picture.getvalue(),'image/png')},headers={'Authorization':'Bearer '+token})
+    assert uploaded.status_code==200
+    archive=backup(tmp_path,tmp_path.parent/'snapshot.zip')
+    with zipfile.ZipFile(archive) as content:
+        assert 'chat.db' in content.namelist()
+        assert 'uploads/'+uploaded.json()['id'] in content.namelist()
 
 def test_ws_join_and_room_message():
     with client.websocket_connect('/ws') as ws:
