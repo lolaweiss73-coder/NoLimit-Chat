@@ -79,3 +79,26 @@ def test_offline_message_survives_reconnect():
             pass
         assert reply['messages'][-1]['text'] == 'הודעה אחרי ניתוק'
         assert reply['inbox'][0]['unread'] == 0
+
+def test_friend_request_acceptance():
+    with client.websocket_connect('/ws') as bob:
+        bob.receive_json()
+        bob.send_json({'type':'hello','profile':{'nickname':'בוב','age':30,'gender':'male'}})
+        while (reply := bob.receive_json())['type'] != 'bootstrap': pass
+        bob_id, bob_token = reply['self']['identity_id'], reply['identity_token']
+    with client.websocket_connect('/ws') as alice:
+        alice.receive_json()
+        alice.send_json({'type':'hello','profile':{'nickname':'אליס','age':30,'gender':'female'}})
+        while (reply := alice.receive_json())['type'] != 'bootstrap': pass
+        alice_id = reply['self']['identity_id']
+        alice.send_json({'type':'friend_request','identity_id':bob_id})
+        while (reply := alice.receive_json())['type'] != 'friends': pass
+        assert reply['friends'][0]['status'] == 'pending'
+    with client.websocket_connect('/ws') as bob:
+        bob.receive_json()
+        bob.send_json({'type':'hello','identity_token':bob_token,'profile':{'nickname':'בוב','age':30,'gender':'male'}})
+        while (reply := bob.receive_json())['type'] != 'bootstrap': pass
+        assert reply['friends'][0]['incoming'] is True
+        bob.send_json({'type':'friend_reply','identity_id':alice_id,'accept':True})
+        while (reply := bob.receive_json())['type'] != 'friends' or reply['friends'][0]['status'] != 'accepted': pass
+        assert reply['friends'][0]['status'] == 'accepted'

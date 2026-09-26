@@ -2,7 +2,7 @@ const $ = (s) => document.querySelector(s);
 const state = {
   ws: null, clientId: null, self: null, users: [], rooms: [], active: {type:'room', id:'general'},
   messages: new Map(), ignored: new Set(JSON.parse(localStorage.getItem('ignoredUsers') || '[]')),
-  blocked: new Set(), dnd: false, inbox: [],
+  blocked: new Set(), dnd: false, inbox: [], friends: [],
 };
 
 const labels = {
@@ -41,9 +41,9 @@ function send(payload){ if(state.ws?.readyState===WebSocket.OPEN) state.ws.send(
 function handle(m){
   if(m.type==='connected'){ state.clientId=m.client_id; $('#statusDot').classList.add('online'); }
   else if(m.type==='bootstrap'){
-    state.self=m.self; state.users=m.users; state.rooms=m.rooms; state.inbox=m.inbox||[]; state.active={type:'room',id:m.active_room};
+    state.self=m.self; state.users=m.users; state.rooms=m.rooms; state.inbox=m.inbox||[]; state.friends=m.friends||[]; state.active={type:'room',id:m.active_room};
     localStorage.setItem('chatIdentityToken',m.identity_token);
-    $('#dmPolicy').value=state.self.dm_policy||'any'; closeModal('gate'); renderAll();
+    $('#dmPolicy').value=state.self.dm_policy||'any'; $('#profileDescription').value=state.self.description||''; closeModal('gate'); renderAll();
   }
   else if(m.type==='presence'){ state.users=m.users; renderUsers(); renderInbox(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
   else if(m.type==='rooms'){ state.rooms=m.rooms; renderRooms(); }
@@ -61,13 +61,20 @@ function handle(m){
     else if(m.message.from_identity!==state.self.identity_id) toast(`הודעה חדשה מ${m.message.profile.nickname}`);
   }
   else if(m.type==='conversation'){state.messages.set('dm:'+m.identity_id,m.messages);state.inbox=m.inbox;renderInbox();if(keyForActive()==='dm:'+m.identity_id)renderMessages();}
+  else if(m.type==='friends'){state.friends=m.friends;renderFriends();}
   else if(m.type==='blocked'){ state.blocked.add(m.target_id); closeModal('userModal'); renderUsers(); toast('המשתמש נחסם'); }
   else if(m.type==='blocked_by'){ state.blocked.add(m.target_id); renderUsers(); if(state.active.type==='dm'&&state.active.id===m.target_id){state.active={type:'room',id:'general'};renderConversation();} toast('התקשורת עם משתמש נחסמה'); }
   else if(m.type==='report_received'){ toast('הדיווח התקבל'); closeModal('userModal'); }
   else if(m.type==='error'){ toast(m.message||'אירעה שגיאה'); }
 }
 
-function renderAll(){ renderRooms(); renderUsers(); renderInbox(); renderConversation(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
+function renderAll(){ renderRooms(); renderUsers(); renderInbox(); renderFriends(); renderConversation(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
+function renderFriends(){
+  $('#friendsList').innerHTML=state.friends.filter(f=>f.status!=='rejected').map(f=>`<div class="user-row"><span>${escapeHtml(f.nickname)} · ${f.status==='accepted'?'חברים':f.incoming?'בקשה נכנסת':'בקשה נשלחה'}</span>${f.status==='pending'&&f.incoming?`<button class="primary" data-accept="${escapeHtml(f.identity_id)}">אישור</button><button class="ghost" data-reject="${escapeHtml(f.identity_id)}">דחייה</button>`:f.status==='accepted'?`<button class="ghost" data-friend-chat="${escapeHtml(f.identity_id)}">שיחה</button>`:''}</div>`).join('')||'<p class="muted" style="padding:12px">עדיין אין חברים.</p>';
+  document.querySelectorAll('[data-accept]').forEach(el=>el.onclick=()=>send({type:'friend_reply',identity_id:el.dataset.accept,accept:true}));
+  document.querySelectorAll('[data-reject]').forEach(el=>el.onclick=()=>send({type:'friend_reply',identity_id:el.dataset.reject,accept:false}));
+  document.querySelectorAll('[data-friend-chat]').forEach(el=>el.onclick=()=>openConversation(el.dataset.friendChat));
+}
 function renderInbox(){
   $('#inboxList').innerHTML=state.inbox.map(i=>`<div class="user-row" data-inbox="${escapeHtml(i.identity_id)}"><div class="row-main"><div class="row-title">${escapeHtml(i.nickname)}</div></div>${i.unread?`<span class="badge">${i.unread} חדשות</span>`:''}</div>`).join('')||'<p class="muted" style="padding:12px">עדיין אין הודעות.</p>';
   document.querySelectorAll('[data-inbox]').forEach(el=>el.onclick=()=>openConversation(el.dataset.inbox));
@@ -116,9 +123,10 @@ function joinRoom(id){
 }
 function openUser(id){
   const u=state.users.find(x=>x.client_id===id); if(!u)return;
-  $('#userCard').innerHTML=`<div class="user-card-head"><div class="avatar ${avatarClass(u.gender)}">${escapeHtml(initials(u.nickname))}</div><div><h2>${escapeHtml(u.nickname)}</h2><div class="muted">${u.age} · ${labels.gender[u.gender]} · ${labels.region[u.region]||u.region}</div></div></div><p>סטטוס: ${labels.relationship[u.relationship_status]||'לא צוין'}${u.dnd?' · נא לא להפריע':''}</p><div class="actions"><button id="dmUser" class="primary">פתח שיחה</button><button id="ignoreUser" class="ghost">התעלם</button><button id="reportUser" class="ghost">דווח</button><button id="blockUser" class="danger">חסום</button></div>`;
+  $('#userCard').innerHTML=`<div class="user-card-head"><div class="avatar ${avatarClass(u.gender)}">${escapeHtml(initials(u.nickname))}</div><div><h2>${escapeHtml(u.nickname)}</h2><div class="muted">${u.age} · ${labels.gender[u.gender]} · ${labels.region[u.region]||u.region}</div></div></div><p>${escapeHtml(u.description||'')}</p><p>סטטוס: ${labels.relationship[u.relationship_status]||'לא צוין'}${u.dnd?' · נא לא להפריע':''}</p><div class="actions"><button id="dmUser" class="primary">פתח שיחה</button><button id="friendUser" class="ghost">בקשת חברות</button><button id="ignoreUser" class="ghost">התעלם</button><button id="reportUser" class="ghost">דווח</button><button id="blockUser" class="danger">חסום</button></div>`;
   openModal('userModal');
   $('#dmUser').onclick=()=>{closeModal('userModal');openConversation(u.identity_id);};
+  $('#friendUser').onclick=()=>{send({type:'friend_request',identity_id:u.identity_id});closeModal('userModal');};
   $('#ignoreUser').onclick=()=>{state.ignored.add(id);localStorage.setItem('ignoredUsers',JSON.stringify([...state.ignored]));closeModal('userModal');renderUsers();toast('המשתמש הוסתר אצלך');};
   $('#blockUser').onclick=()=>send({type:'block',target_id:id});
   $('#reportUser').onclick=()=>{const reason=prompt('סיבת הדיווח')||'';if(reason)send({type:'report',target_id:id,reason,details:''});};
@@ -137,6 +145,7 @@ $('#messageInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKe
 $('#userSearch').oninput=renderUsers; $('#userSort').onchange=renderUsers;
 $('#settingsBtn').onclick=()=>openModal('settingsModal');
 $('#dmPolicy').onchange=()=>send({type:'profile_update',dm_policy:$('#dmPolicy').value});
+$('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value});closeModal('settingsModal');};
 $('#dndBtn').onclick=()=>{state.dnd=!state.dnd;$('#dndBtn').textContent=`נא לא להפריע: ${state.dnd?'פעיל':'כבוי'}`;send({type:'profile_update',dnd:state.dnd});};
 $('#newRoomBtn').onclick=()=>openModal('roomModal');
 $('#roomPrivate').onchange=()=>$('#roomPasswordWrap').classList.toggle('hidden',!$('#roomPrivate').checked);

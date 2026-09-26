@@ -65,6 +65,8 @@
       <div class="panel-head"><div><h2>מחוברים</h2><span class="muted small">חיפוש ומיון חופשי</span></div></div>
       <div class="panel-head"><h2>תיבת הודעות</h2></div>
       <div id="inboxList" class="list"></div>
+      <div class="panel-head"><h2>חברים ובקשות</h2></div>
+      <div id="friendsList" class="list"></div>
       <div class="panel-head"><h2>מחוברים</h2></div>
       <div class="toolbar">
         <input id="userSearch" placeholder="חיפוש לפי כינוי" />
@@ -86,6 +88,8 @@
       <button class="close" data-close="settingsModal">×</button>
       <h2>הגדרות</h2>
       <label>מי יכול לפנות אליי בפרטי<select id="dmPolicy"><option value="any">כולם</option><option value="female">נשים בלבד</option><option value="male">גברים בלבד</option><option value="none">אף אחד</option></select></label>
+      <label>תיאור בפרופיל<textarea id="profileDescription" maxlength="500" rows="4"></textarea></label>
+      <button id="saveProfileBtn" class="primary">שמור פרופיל</button>
       <p class="muted small">הפרטים הבסיסיים נשמרים רק במכשיר אם סימנת זכירה. הודעות הצ'אט אינן נשמרות במסד הנתונים בגרסה הזאת.</p>
     </div>
   </div>

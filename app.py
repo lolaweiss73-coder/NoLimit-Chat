@@ -64,6 +64,7 @@ def init_db() -> None:
     if "dm_policy" not in {column[1] for column in con.execute("PRAGMA table_info(identities)")}:
         con.execute("ALTER TABLE identities ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'any'")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
+    con.execute("CREATE TABLE IF NOT EXISTS friendships (requester_id TEXT NOT NULL, recipient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, PRIMARY KEY(requester_id,recipient_id))")
     con.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
     con.execute("CREATE INDEX IF NOT EXISTS messages_recipient ON messages(recipient_id,created_at)")
     existing = con.execute("SELECT COUNT(*) AS c FROM rooms").fetchone()["c"]
@@ -169,6 +170,12 @@ class Hub:
             result.append({"identity_id":r["other_id"],"nickname":person["nickname"] if person else "משתמש", "unread":r["unread"],"last_ts":r["last_ts"]})
         con.close()
         return result
+
+    def friendships(self, identity_id: str) -> list[dict[str, Any]]:
+        con = db()
+        rows = con.execute("SELECT f.requester_id,f.recipient_id,f.status,i.nickname FROM friendships f JOIN identities i ON i.id=CASE WHEN f.requester_id=? THEN f.recipient_id ELSE f.requester_id END WHERE f.requester_id=? OR f.recipient_id=? ORDER BY f.created_at DESC",(identity_id,identity_id,identity_id)).fetchall()
+        con.close()
+        return [{"identity_id":r["recipient_id"] if r["requester_id"]==identity_id else r["requester_id"],"nickname":r["nickname"],"status":r["status"],"incoming":r["recipient_id"]==identity_id} for r in rows]
 
     def room_allowed(self, room_id: str, profile: dict[str, Any], password: str = "") -> tuple[bool, str]:
         con = db()
@@ -283,6 +290,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "active_room": "general",
                     "identity_token": token,
                     "inbox": hub.inbox(identity_id),
+                    "friends": hub.friendships(identity_id),
                 })
                 await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
                 await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})
@@ -299,12 +307,43 @@ async def websocket_endpoint(ws: WebSocket):
                         p[key] = data[key]
                 if "dnd" in data:
                     p["dnd"] = bool(data["dnd"])
+                if "description" in data:
+                    p["description"] = str(data["description"]).strip()[:500]
                 if p["dm_policy"] not in {"any","female","male","none"}: p["dm_policy"] = "any"
                 con = db()
-                con.execute("UPDATE identities SET dm_policy=? WHERE id=?",(p["dm_policy"],p["identity_id"]))
+                con.execute("UPDATE identities SET dm_policy=?,description=? WHERE id=?",(p["dm_policy"],p["description"],p["identity_id"]))
                 con.commit()
                 con.close()
                 await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
+
+            elif mtype == "friend_request":
+                target_identity = str(data.get("identity_id", ""))
+                sender_identity = hub.identity_for(client_id)
+                if target_identity == sender_identity: continue
+                con = db()
+                target = con.execute("SELECT id FROM identities WHERE id=?",(target_identity,)).fetchone()
+                blocked = con.execute("SELECT 1 FROM identity_blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(sender_identity,target_identity,target_identity,sender_identity)).fetchone()
+                if target and not blocked:
+                    con.execute("INSERT OR IGNORE INTO friendships (requester_id,recipient_id,status,created_at) VALUES (?,?,?,?)",(sender_identity,target_identity,"pending",time.time()))
+                    con.commit()
+                con.close()
+                for identity in (target_identity,sender_identity):
+                    online = hub.identity_clients.get(identity)
+                    if online: await hub.send(online,{"type":"friends","friends":hub.friendships(identity)})
+
+            elif mtype == "friend_reply":
+                requester = str(data.get("identity_id", ""))
+                recipient = hub.identity_for(client_id)
+                status = "accepted" if data.get("accept") is True else "rejected"
+                con = db()
+                con.execute("UPDATE friendships SET status=? WHERE requester_id=? AND recipient_id=? AND status='pending'",(status,requester,recipient))
+                changed = con.total_changes
+                con.commit()
+                con.close()
+                if changed:
+                    for identity in (recipient,requester):
+                        online = hub.identity_clients.get(identity)
+                        if online: await hub.send(online,{"type":"friends","friends":hub.friendships(identity)})
 
             elif mtype == "conversation":
                 other_id = str(data.get("identity_id", ""))
