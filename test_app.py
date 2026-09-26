@@ -50,3 +50,32 @@ def test_dm_gender_policy_and_invalid_age():
             if response['type'] == 'error':
                 assert 'נשים בלבד' in response['message']
                 break
+
+def test_offline_message_survives_reconnect():
+    with client.websocket_connect('/ws') as recipient:
+        recipient.receive_json()
+        recipient.send_json({'type':'hello','profile':{'nickname':'נמען','age':31,'gender':'male'}})
+        while (reply := recipient.receive_json())['type'] != 'bootstrap':
+            pass
+        identity_id, token = reply['self']['identity_id'], reply['identity_token']
+    with client.websocket_connect('/ws') as sender:
+        sender.receive_json()
+        sender.send_json({'type':'hello','profile':{'nickname':'כותבת','age':32,'gender':'female'}})
+        while sender.receive_json()['type'] != 'bootstrap':
+            pass
+        sender.send_json({'type':'dm','identity_id':identity_id,'text':'הודעה אחרי ניתוק'})
+        while sender.receive_json()['type'] != 'dm':
+            pass
+    with client.websocket_connect('/ws') as recipient:
+        recipient.receive_json()
+        recipient.send_json({'type':'hello','identity_token':token,'profile':{'nickname':'נמען','age':31,'gender':'male'}})
+        while (reply := recipient.receive_json())['type'] != 'bootstrap':
+            pass
+        assert reply['self']['identity_id'] == identity_id
+        assert any(item['unread'] == 1 for item in reply['inbox'])
+        other_id = reply['inbox'][0]['identity_id']
+        recipient.send_json({'type':'conversation','identity_id':other_id})
+        while (reply := recipient.receive_json())['type'] != 'conversation':
+            pass
+        assert reply['messages'][-1]['text'] == 'הודעה אחרי ניתוק'
+        assert reply['inbox'][0]['unread'] == 0

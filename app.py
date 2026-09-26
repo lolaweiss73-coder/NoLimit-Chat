@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
+import secrets
 import sqlite3
 import time
 import uuid
@@ -58,6 +60,12 @@ def init_db() -> None:
         )
         """
     )
+    con.execute("CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, nickname TEXT NOT NULL, age INTEGER NOT NULL, gender TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', dm_policy TEXT NOT NULL DEFAULT 'any', created_at REAL NOT NULL)")
+    if "dm_policy" not in {column[1] for column in con.execute("PRAGMA table_info(identities)")}:
+        con.execute("ALTER TABLE identities ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'any'")
+    con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
+    con.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
+    con.execute("CREATE INDEX IF NOT EXISTS messages_recipient ON messages(recipient_id,created_at)")
     existing = con.execute("SELECT COUNT(*) AS c FROM rooms").fetchone()["c"]
     if not existing:
         now = time.time()
@@ -81,6 +89,7 @@ class Hub:
     def __init__(self) -> None:
         self.clients: dict[str, WebSocket] = {}
         self.profiles: dict[str, dict[str, Any]] = {}
+        self.identity_clients: dict[str, str] = {}
         self.room_members: dict[str, set[str]] = defaultdict(set)
         self.blocked: dict[str, set[str]] = defaultdict(set)
         self.lock = asyncio.Lock()
@@ -126,6 +135,11 @@ class Hub:
             return False, "התקשורת בין המשתמשים חסומה"
         target = self.profiles[target_id]
         sender = self.profiles.get(sender_id, {})
+        con = db()
+        blocked = con.execute("SELECT 1 FROM identity_blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(sender.get("identity_id"),target.get("identity_id"),target.get("identity_id"),sender.get("identity_id"))).fetchone()
+        con.close()
+        if blocked:
+            return False, "התקשורת בין המשתמשים חסומה"
         if target.get("dnd"):
             return False, "המשתמש במצב נא לא להפריע"
         policy = target.get("dm_policy", "any")
@@ -136,6 +150,25 @@ class Hub:
         if policy == "male" and sender.get("gender") != "male":
             return False, "המשתמש מקבל כרגע פניות מגברים בלבד"
         return True, ""
+
+    def identity_for(self, client_id: str) -> str:
+        return self.profiles[client_id]["identity_id"]
+
+    def conversation(self, identity_id: str, other_id: str) -> list[dict[str, Any]]:
+        con = db()
+        rows = con.execute("SELECT m.id,m.sender_id,m.recipient_id,m.text,m.created_at,m.read_at,i.nickname FROM messages m JOIN identities i ON i.id=m.sender_id WHERE (m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?) ORDER BY m.created_at DESC LIMIT 100", (identity_id,other_id,other_id,identity_id)).fetchall()
+        con.close()
+        return [{"id":r["id"],"from_identity":r["sender_id"],"to_identity":r["recipient_id"],"text":r["text"],"ts":r["created_at"],"read_at":r["read_at"],"profile":{"nickname":r["nickname"]}} for r in reversed(rows)]
+
+    def inbox(self, identity_id: str) -> list[dict[str, Any]]:
+        con = db()
+        rows = con.execute("SELECT CASE WHEN sender_id=? THEN recipient_id ELSE sender_id END AS other_id,MAX(created_at) AS last_ts,SUM(CASE WHEN recipient_id=? AND read_at IS NULL THEN 1 ELSE 0 END) AS unread FROM messages WHERE sender_id=? OR recipient_id=? GROUP BY other_id ORDER BY last_ts DESC", (identity_id,identity_id,identity_id,identity_id)).fetchall()
+        result = []
+        for r in rows:
+            person = con.execute("SELECT nickname FROM identities WHERE id=?",(r["other_id"],)).fetchone()
+            result.append({"identity_id":r["other_id"],"nickname":person["nickname"] if person else "משתמש", "unread":r["unread"],"last_ts":r["last_ts"]})
+        con.close()
+        return result
 
     def room_allowed(self, room_id: str, profile: dict[str, Any], password: str = "") -> tuple[bool, str]:
         con = db()
@@ -210,7 +243,24 @@ async def websocket_endpoint(ws: WebSocket):
                 if not nickname or age < 18 or gender not in {"female", "male", "other"}:
                     await hub.send(client_id, {"type": "error", "message": "יש למלא כינוי, גיל 18+ ומגדר"})
                     continue
+                token = str(data.get("identity_token") or "")
+                token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
+                con = db()
+                identity = con.execute("SELECT id,nickname,age,gender,description,dm_policy FROM identities WHERE token_hash=?", (token_hash,)).fetchone() if token else None
+                if identity:
+                    identity_id = identity["id"]
+                    nickname, age, gender = identity["nickname"], identity["age"], identity["gender"]
+                else:
+                    token = secrets.token_urlsafe(32)
+                    identity_id = str(uuid.uuid4())
+                    policy = profile.get("dm_policy", "any")
+                    if policy not in {"any","female","male","none"}: policy = "any"
+                    con.execute("INSERT INTO identities (id,token_hash,nickname,age,gender,dm_policy,created_at) VALUES (?,?,?,?,?,?,?)",(identity_id,hashlib.sha256(token.encode()).hexdigest(),nickname,age,gender,policy,time.time()))
+                    con.commit()
+                con.close()
                 clean = {
+                    "identity_id": identity_id,
+                    "description": identity["description"] if identity else "",
                     "nickname": nickname,
                     "age": min(age, 99),
                     "gender": gender,
@@ -218,11 +268,12 @@ async def websocket_endpoint(ws: WebSocket):
                     "relationship_status": profile.get("relationship_status", "unspecified"),
                     "region": profile.get("region", "unspecified"),
                     "dnd": bool(profile.get("dnd", False)),
-                    "dm_policy": profile.get("dm_policy", "any"),
+                    "dm_policy": identity["dm_policy"] if identity else policy,
                     "joined_at": time.time(),
                 }
                 async with hub.lock:
                     hub.profiles[client_id] = clean
+                    hub.identity_clients[identity_id] = client_id
                     hub.room_members["general"].add(client_id)
                 await hub.send(client_id, {
                     "type": "bootstrap",
@@ -230,6 +281,8 @@ async def websocket_endpoint(ws: WebSocket):
                     "users": hub.online_snapshot(),
                     "rooms": hub.room_snapshot(),
                     "active_room": "general",
+                    "identity_token": token,
+                    "inbox": hub.inbox(identity_id),
                 })
                 await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
                 await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})
@@ -246,7 +299,24 @@ async def websocket_endpoint(ws: WebSocket):
                         p[key] = data[key]
                 if "dnd" in data:
                     p["dnd"] = bool(data["dnd"])
+                if p["dm_policy"] not in {"any","female","male","none"}: p["dm_policy"] = "any"
+                con = db()
+                con.execute("UPDATE identities SET dm_policy=? WHERE id=?",(p["dm_policy"],p["identity_id"]))
+                con.commit()
+                con.close()
                 await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
+
+            elif mtype == "conversation":
+                other_id = str(data.get("identity_id", ""))
+                identity_id = hub.identity_for(client_id)
+                con = db()
+                exists = con.execute("SELECT 1 FROM identities WHERE id=?",(other_id,)).fetchone()
+                if exists:
+                    con.execute("UPDATE messages SET read_at=? WHERE sender_id=? AND recipient_id=? AND read_at IS NULL",(time.time(),other_id,identity_id))
+                    con.commit()
+                con.close()
+                if exists:
+                    await hub.send(client_id,{"type":"conversation","identity_id":other_id,"messages":hub.conversation(identity_id,other_id),"inbox":hub.inbox(identity_id)})
 
             elif mtype == "join_room":
                 room_id = str(data.get("room_id", ""))
@@ -280,24 +350,45 @@ async def websocket_endpoint(ws: WebSocket):
                 await hub.broadcast(payload, list(hub.room_members[room_id]))
 
             elif mtype == "dm":
-                target_id = str(data.get("target_id", ""))
+                target_identity = str(data.get("identity_id", ""))
+                target_id = hub.identity_clients.get(target_identity) if target_identity else str(data.get("target_id", ""))
                 text = str(data.get("text", "")).strip()[:4000]
                 if not text:
                     continue
-                ok, reason = hub.can_contact(client_id, target_id)
+                if target_id:
+                    ok, reason = hub.can_contact(client_id, target_id)
+                elif target_identity:
+                    con = db()
+                    exists = con.execute("SELECT gender,dm_policy FROM identities WHERE id=?",(target_identity,)).fetchone()
+                    blocked = con.execute("SELECT 1 FROM identity_blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(sender_identity := hub.identity_for(client_id),target_identity,target_identity,sender_identity)).fetchone()
+                    con.close()
+                    sender_gender = hub.profiles[client_id]["gender"]
+                    ok = bool(exists) and not blocked and exists["dm_policy"] != "none" and (exists["dm_policy"] == "any" or exists["dm_policy"] == sender_gender)
+                    reason = "לא ניתן לשלוח הודעה למשתמש הזה"
+                else:
+                    ok, reason = False, "המשתמש לא קיים"
                 if not ok:
                     await hub.send(client_id, {"type": "error", "message": reason})
                     continue
+                sender_identity = hub.identity_for(client_id)
+                target_identity = target_identity or hub.identity_for(target_id)
                 msg = {
                     "id": str(uuid.uuid4()),
                     "from": client_id,
                     "to": target_id,
+                    "from_identity": sender_identity,
+                    "to_identity": target_identity,
                     "profile": hub.profiles[client_id],
                     "text": text,
                     "ts": time.time(),
                 }
-                await hub.send(target_id, {"type": "dm", "message": msg})
-                await hub.send(client_id, {"type": "dm", "message": msg})
+                con = db()
+                con.execute("INSERT INTO messages (id,sender_id,recipient_id,text,created_at) VALUES (?,?,?,?,?)",(msg["id"],sender_identity,target_identity,text,msg["ts"]))
+                con.commit()
+                con.close()
+                if target_id:
+                    await hub.send(target_id, {"type": "dm", "message": msg, "inbox": hub.inbox(target_identity)})
+                await hub.send(client_id, {"type": "dm", "message": msg, "inbox": hub.inbox(sender_identity)})
 
             elif mtype == "create_room":
                 raw = data.get("room") or {}
@@ -342,8 +433,14 @@ async def websocket_endpoint(ws: WebSocket):
             elif mtype == "block":
                 target_id = str(data.get("target_id", ""))
                 if target_id and target_id != client_id:
+                    if target_id not in hub.profiles:
+                        continue
                     hub.blocked[client_id].add(target_id)
                     hub.blocked[target_id].add(client_id)
+                    con = db()
+                    con.execute("INSERT OR IGNORE INTO identity_blocks (blocker_id,blocked_id) VALUES (?,?)",(hub.identity_for(client_id),hub.identity_for(target_id)))
+                    con.commit()
+                    con.close()
                     await hub.send(client_id, {"type": "blocked", "target_id": target_id})
                     await hub.send(target_id, {"type": "blocked_by", "target_id": client_id})
 
@@ -364,6 +461,9 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         async with hub.lock:
+            identity_id = hub.profiles.get(client_id, {}).get("identity_id")
+            if identity_id and hub.identity_clients.get(identity_id) == client_id:
+                hub.identity_clients.pop(identity_id, None)
             hub.clients.pop(client_id, None)
             hub.profiles.pop(client_id, None)
             for members in hub.room_members.values():
