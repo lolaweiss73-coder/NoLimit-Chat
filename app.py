@@ -131,9 +131,9 @@ class Hub:
         policy = target.get("dm_policy", "any")
         if policy == "none":
             return False, "המשתמש אינו מקבל הודעות פרטיות"
-        if policy == "women" and sender.get("gender") != "female":
+        if policy == "female" and sender.get("gender") != "female":
             return False, "המשתמש מקבל כרגע פניות מנשים בלבד"
-        if policy == "men" and sender.get("gender") != "male":
+        if policy == "male" and sender.get("gender") != "male":
             return False, "המשתמש מקבל כרגע פניות מגברים בלבד"
         return True, ""
 
@@ -197,9 +197,15 @@ async def websocket_endpoint(ws: WebSocket):
             mtype = data.get("type")
 
             if mtype == "hello":
+                if client_id in hub.profiles:
+                    await hub.send(client_id, {"type": "error", "message": "כבר התחברת"})
+                    continue
                 profile = data.get("profile") or {}
                 nickname = str(profile.get("nickname", "")).strip()[:40]
-                age = int(profile.get("age", 0) or 0)
+                try:
+                    age = int(profile.get("age", 0) or 0)
+                except (ValueError, TypeError):
+                    age = 0
                 gender = profile.get("gender")
                 if not nickname or age < 18 or gender not in {"female", "male", "other"}:
                     await hub.send(client_id, {"type": "error", "message": "יש למלא כינוי, גיל 18+ ומגדר"})
@@ -303,8 +309,12 @@ async def websocket_endpoint(ws: WebSocket):
                 allowed_gender = raw.get("allowed_gender", "all")
                 if allowed_gender not in {"all", "female", "male", "other"}:
                     allowed_gender = "all"
-                min_age = max(18, min(99, int(raw.get("min_age", 18) or 18)))
-                max_age = max(min_age, min(99, int(raw.get("max_age", 99) or 99)))
+                try:
+                    min_age = max(18, min(99, int(raw.get("min_age", 18) or 18)))
+                    max_age = max(min_age, min(99, int(raw.get("max_age", 99) or 99)))
+                except (ValueError, TypeError):
+                    await hub.send(client_id, {"type": "error", "message": "טווח הגילים אינו תקין"})
+                    continue
                 is_private = bool(raw.get("is_private", False))
                 password = str(raw.get("password", ""))[:100] if is_private else ""
                 con = db()
