@@ -220,3 +220,4 @@ document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeModal(b.
 document.querySelectorAll('.mobile-tabs button').forEach(b=>b.onclick=()=>showPanel(b.dataset.panel));
 
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/service-worker.js').catch(()=>{});}
+fetch('/api/youth/status').then(r=>r.json()).then(data=>$('#youthLinkWrap').classList.toggle('hidden',!data.enabled)).catch(()=>{});

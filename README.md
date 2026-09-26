@@ -59,6 +59,9 @@ Set a long random `CHAT_ADMIN_TOKEN` in the server environment. An operator can 
 ## Built-in Morin assistant
 Set `OPENROUTER_API_KEY` and `MORIN_MODEL` in the server environment to enable the assistant. The key stays on the server. A user's last 20 Morin messages are sent to the configured provider for context; Morin chats are stored in the application database and only returned to the same identity. Without either setting, the assistant returns a clear unavailable response. Choose a model and provider privacy setting suitable for the site's data before enabling public access, and set an API key spending limit. The test suite mocks provider calls and does not exercise the live provider.
 
+## No Shame area
+The youth text forum is disabled by default. `YOUTH_ENABLED=1` exposes `/youth` and two separate age bands (13–15 and 16–17). It has no direct messages or media endpoints. Posts containing possible contact details or grooming patterns are held for review; the admin queue is `/api/admin/youth-queue`. Contact details cannot be approved for publication. Age is self-declared and pattern checks have gaps; this is not a verified safe environment yet. Staffed moderation, abuse escalation, adversarial testing and stronger age separation are required before enabling this area for real users. The youth session is separate from the adult identity token.
+
 
 ## Render free deployment
 - Service type: Web Service

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>No Shame</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body style="overflow:auto;padding:16px;max-width:700px;margin:auto">
+  <h1>No Shame</h1>
+  <p>מרחב אנונימי לשאלות ולשיחות עם בני גילך על יחסים, התבגרות וגבולות. כותבים כאן בטקסט בלבד. אין הודעות פרטיות, תמונות או שיתוף פרטי קשר.</p>
+  <section id="joinSection">
+    <label>גיל <input id="youthAge" type="number" min="13" max="17"></label>
+    <button id="joinYouth" class="primary">כניסה</button>
+  </section>
+  <section id="youthForum" class="hidden">
+    <p id="bandLabel"></p>
+    <textarea id="youthText" maxlength="1000" rows="4" placeholder="מה תרצה לשתף או לשאול?"></textarea>
+    <button id="publishYouth" class="primary">פרסום</button>
+    <p id="youthStatus" aria-live="polite"></p>
+    <h2>שיחות</h2>
+    <div id="youthPosts"></div>
+  </section>
+  <script src="/static/youth.js"></script>
+</body>
+</html>

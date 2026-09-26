@@ -6,6 +6,7 @@ import hashlib
 import secrets
 import io
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -80,6 +81,8 @@ def init_db() -> None:
         con.execute("ALTER TABLE identities ADD COLUMN mention_policy TEXT NOT NULL DEFAULT 'all'")
     con.execute("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, sender_id TEXT NOT NULL, room_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
     con.execute("CREATE TABLE IF NOT EXISTS morin_messages (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL)")
+    con.execute("CREATE TABLE IF NOT EXISTS youth_identities (id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, age_band TEXT NOT NULL, created_at REAL NOT NULL)")
+    con.execute("CREATE TABLE IF NOT EXISTS youth_posts (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, age_band TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, flag_reason TEXT, created_at REAL NOT NULL)")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
     con.execute("CREATE TABLE IF NOT EXISTS moderation_actions (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL)")
     if "reporter_identity" not in {column[1] for column in con.execute("PRAGMA table_info(reports)")}:
@@ -270,6 +273,100 @@ class MorinPrompt(BaseModel):
     message: str = Field(min_length=1,max_length=2000)
 
 
+class YouthJoin(BaseModel):
+    age: int = Field(ge=13,le=17)
+
+
+class YouthPost(BaseModel):
+    text: str = Field(min_length=1,max_length=1000)
+
+
+def youth_enabled() -> None:
+    if os.environ.get("YOUTH_ENABLED") != "1":
+        raise HTTPException(503,"No Shame is not open yet")
+
+
+def youth_from_header(authorization: str | None) -> tuple[str,str]:
+    token = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") else ""
+    if not token: raise HTTPException(401,"Youth session required")
+    con = db()
+    row = con.execute("SELECT id,age_band FROM youth_identities WHERE token_hash=?",(hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+    con.close()
+    if not row: raise HTTPException(401,"Invalid youth session")
+    return row["id"],row["age_band"]
+
+
+@app.post("/api/youth/join")
+async def youth_join(info: YouthJoin):
+    youth_enabled()
+    token = secrets.token_urlsafe(32)
+    band = "13-15" if info.age <= 15 else "16-17"
+    con = db()
+    con.execute("INSERT INTO youth_identities (id,token_hash,age_band,created_at) VALUES (?,?,?,?)",(str(uuid.uuid4()),hashlib.sha256(token.encode()).hexdigest(),band,time.time()))
+    con.commit();con.close()
+    return {"token":token,"age_band":band}
+
+
+CONTACT_PATTERN = re.compile(r"(?:https?://|www\.|@[A-Za-z0-9_.]{3,}|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|(?:\+?\d[\s().-]*){7,}|(?:whats\s*app|telegram|snapchat|instagram|discord|טלגרם|וואטסאפ|אינסטגרם|דיסקורד))",re.IGNORECASE)
+RISK_PATTERN = re.compile(r"(?:keep\s+(?:this|it)\s+secret|don't\s+tell|meet\s+alone|אל\s+תספר|סוד\s+שלנו|להיפגש\s+לבד)",re.IGNORECASE)
+youth_post_times: dict[str,deque[float]] = defaultdict(deque)
+
+
+@app.post("/api/youth/posts")
+async def youth_publish(post: YouthPost, authorization: str | None = Header(default=None)):
+    youth_enabled()
+    identity_id,band = youth_from_header(authorization)
+    now = time.monotonic(); recent = youth_post_times[identity_id]
+    while recent and recent[0] < now-60: recent.popleft()
+    if len(recent)>=5: raise HTTPException(429,"Too many posts")
+    recent.append(now)
+    content = post.text.strip()
+    if not content: raise HTTPException(422,"Empty post")
+    if CONTACT_PATTERN.search(content):
+        status,reason="held","possible contact detail or off-platform move"
+    elif RISK_PATTERN.search(content):
+        status,reason="held","possible secrecy or meeting request"
+    else:
+        status,reason="visible",None
+    con = db()
+    con.execute("INSERT INTO youth_posts (id,author_id,age_band,text,status,flag_reason,created_at) VALUES (?,?,?,?,?,?,?)",(str(uuid.uuid4()),identity_id,band,content,status,reason,time.time()))
+    con.commit();con.close()
+    return {"status":status,"message":"נשלח לבדיקה" if status=="held" else "פורסם"}
+
+
+@app.get("/api/youth/posts")
+async def youth_feed(authorization: str | None = Header(default=None)):
+    youth_enabled()
+    _,band = youth_from_header(authorization)
+    con = db()
+    rows = con.execute("SELECT id,text,created_at FROM youth_posts WHERE age_band=? AND status='visible' ORDER BY created_at DESC LIMIT 100",(band,)).fetchall()
+    con.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/admin/youth-queue")
+async def youth_queue(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    con = db()
+    rows = con.execute("SELECT id,age_band,text,flag_reason,created_at FROM youth_posts WHERE status='held' ORDER BY created_at LIMIT 200").fetchall()
+    con.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/admin/youth-queue/{post_id}/decision/{decision}")
+async def youth_decision(post_id: str,decision: str,authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    if decision not in {"approve","reject"}: raise HTTPException(400,"Invalid decision")
+    con = db()
+    record = con.execute("SELECT text FROM youth_posts WHERE id=? AND status='held'",(post_id,)).fetchone()
+    if decision=="approve" and record and CONTACT_PATTERN.search(record["text"]):
+        con.close(); raise HTTPException(400,"Contact details cannot be published")
+    changed = con.execute("UPDATE youth_posts SET status=? WHERE id=? AND status='held'",("visible" if decision=="approve" else "rejected",post_id)).rowcount
+    con.commit();con.close()
+    if not changed: raise HTTPException(404,"Post not found")
+    return {"ok":True}
+
+
 @app.post("/api/morin")
 async def morin_chat(prompt: MorinPrompt, authorization: str | None = Header(default=None)):
     identity_id = identity_from_header(authorization)
@@ -415,6 +512,12 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/youth")
+async def youth_page() -> FileResponse:
+    youth_enabled()
+    return FileResponse(STATIC_DIR / "youth.html")
+
+
 @app.get("/manifest.webmanifest")
 async def manifest() -> FileResponse:
     return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
@@ -428,6 +531,11 @@ async def service_worker() -> FileResponse:
 @app.get("/api/health")
 async def health() -> JSONResponse:
     return JSONResponse({"ok": True, "online": len(hub.clients), "rooms": len(hub.room_snapshot())})
+
+
+@app.get("/api/youth/status")
+async def youth_status():
+    return {"enabled":os.environ.get("YOUTH_ENABLED")=="1"}
 
 
 def require_admin(authorization: str | None) -> None:

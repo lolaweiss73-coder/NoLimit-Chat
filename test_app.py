@@ -101,6 +101,28 @@ def test_morin_config_and_isolated_history(monkeypatch):
     assert len(client.get('/api/morin/history',headers=headers).json())==2
     assert client.get('/api/morin/history',headers={'Authorization':'Bearer '+tokens[1]}).json()==[]
 
+def test_youth_age_bands_contact_hold_and_admin_review(monkeypatch):
+    monkeypatch.delenv('YOUTH_ENABLED',raising=False)
+    assert client.get('/youth').status_code==503
+    monkeypatch.setenv('YOUTH_ENABLED','1')
+    assert client.post('/api/youth/join',json={'age':18}).status_code==422
+    young=client.post('/api/youth/join',json={'age':14}).json()
+    older=client.post('/api/youth/join',json={'age':16}).json()
+    assert young['age_band'] != older['age_band']
+    header={'Authorization':'Bearer '+young['token']}
+    assert client.post('/api/youth/posts',json={'text':'יש לי שאלה על חברות'},headers=header).json()['status']=='visible'
+    assert client.get('/api/youth/posts',headers={'Authorization':'Bearer '+older['token']}).json()==[]
+    assert client.post('/api/youth/posts',json={'text':'כתבו לי 0501234567'},headers=header).json()['status']=='held'
+    assert len(client.get('/api/youth/posts',headers=header).json())==1
+    monkeypatch.setenv('CHAT_ADMIN_TOKEN','admin-test-token')
+    admin={'Authorization':'Bearer admin-test-token'}
+    queue=client.get('/api/admin/youth-queue',headers=admin).json()
+    assert len(queue)==1
+    assert client.post('/api/admin/youth-queue/'+queue[0]['id']+'/decision/approve',headers=admin).status_code==400
+    assert client.post('/api/admin/youth-queue/'+queue[0]['id']+'/decision/reject',headers=admin).status_code==200
+    assert client.get('/api/youth/posts',headers=header).json()[0]['text']=='יש לי שאלה על חברות'
+    assert client.get('/api/youth/posts',headers={'Authorization':'Bearer invalid'}).status_code==401
+
 def test_private_room_rejects_wrong_password():
     import time
     con = app.db()
