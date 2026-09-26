@@ -17,6 +17,8 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
+import httpx
+from pydantic import BaseModel, Field
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -77,6 +79,7 @@ def init_db() -> None:
     if "mention_policy" not in {entry[1] for entry in con.execute("PRAGMA table_info(identities)")}:
         con.execute("ALTER TABLE identities ADD COLUMN mention_policy TEXT NOT NULL DEFAULT 'all'")
     con.execute("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, sender_id TEXT NOT NULL, room_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
+    con.execute("CREATE TABLE IF NOT EXISTS morin_messages (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL)")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
     con.execute("CREATE TABLE IF NOT EXISTS moderation_actions (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL)")
     if "reporter_identity" not in {column[1] for column in con.execute("PRAGMA table_info(reports)")}:
@@ -260,6 +263,53 @@ class Hub:
 
 
 hub = Hub()
+morin_request_times: dict[str, deque[float]] = defaultdict(deque)
+
+
+class MorinPrompt(BaseModel):
+    message: str = Field(min_length=1,max_length=2000)
+
+
+@app.post("/api/morin")
+async def morin_chat(prompt: MorinPrompt, authorization: str | None = Header(default=None)):
+    identity_id = identity_from_header(authorization)
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    model = os.environ.get("MORIN_MODEL", "")
+    if not key or not model:
+        raise HTTPException(503, "Morin is not configured")
+    now = time.monotonic()
+    recent = morin_request_times[identity_id]
+    while recent and recent[0] < now - 3600: recent.popleft()
+    if len(recent) >= 20: raise HTTPException(429, "Morin message limit reached")
+    recent.append(now)
+    con = db()
+    history = con.execute("SELECT role,text FROM morin_messages WHERE identity_id=? ORDER BY created_at DESC LIMIT 20",(identity_id,)).fetchall()
+    con.close()
+    messages = [{"role":"system","content":"You are Morin, the built-in assistant in No Limit Chat. Speak in the user's language. Be clear, warm, respectful and honest. Explain that you are an AI when relevant. Help users navigate the site and communicate safely. Do not claim to know their identity or other private conversations. Do not disclose private user data."}]
+    messages += [{"role":r["role"],"content":r["text"]} for r in reversed(history)]
+    messages.append({"role":"user","content":prompt.message.strip()})
+    try:
+        async with httpx.AsyncClient(timeout=25) as remote:
+            response = await remote.post("https://openrouter.ai/api/v1/chat/completions",headers={"Authorization":f"Bearer {key}"},json={"model":model,"messages":messages,"max_tokens":500})
+            response.raise_for_status()
+            answer = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(answer,str) or not answer.strip(): raise ValueError("Empty model response")
+    except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError):
+        raise HTTPException(502,"Morin is temporarily unavailable")
+    con = db()
+    con.execute("INSERT INTO morin_messages (id,identity_id,role,text,created_at) VALUES (?,?,?,?,?)",(str(uuid.uuid4()),identity_id,"user",prompt.message.strip(),time.time()))
+    con.execute("INSERT INTO morin_messages (id,identity_id,role,text,created_at) VALUES (?,?,?,?,?)",(str(uuid.uuid4()),identity_id,"assistant",answer.strip()[:4000],time.time()+0.000001))
+    con.commit();con.close()
+    return {"reply":answer.strip()[:4000]}
+
+
+@app.get("/api/morin/history")
+async def morin_history(authorization: str | None = Header(default=None)):
+    identity_id = identity_from_header(authorization)
+    con = db()
+    rows = con.execute("SELECT role,text,created_at FROM morin_messages WHERE identity_id=? ORDER BY created_at DESC LIMIT 100",(identity_id,)).fetchall()
+    con.close()
+    return [dict(row) for row in reversed(rows)]
 
 
 def identity_from_header(authorization: str | None) -> str:

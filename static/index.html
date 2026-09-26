@@ -32,6 +32,7 @@
   <header class="topbar">
     <div class="brand"><span class="status-dot" id="statusDot"></span><strong>הצ'אט</strong><span id="onlineCount" class="pill">0 מחוברים</span></div>
     <div class="top-actions">
+      <button id="morinBtn" class="ghost">דברי עם מורין</button>
       <button id="dndBtn" class="ghost">נא לא להפריע: כבוי</button>
       <button id="settingsBtn" class="ghost">הגדרות</button>
     </div>
@@ -130,6 +131,16 @@
     <div class="modal-card">
       <button class="close" data-close="userModal">×</button>
       <div id="userCard"></div>
+    </div>
+  </div>
+
+  <div id="morinModal" class="modal">
+    <div class="modal-card">
+      <button class="close" data-close="morinModal">×</button>
+      <h2>מורין</h2>
+      <p class="muted small">עוזרת AI מובנית. ההודעות בשיחה הזו נשמרות בפרופיל שלך ונשלחות לספק ה־AI כשמוגדר חיבור.</p>
+      <div id="morinHistory" class="messages" style="min-height:180px;max-height:50vh"></div>
+      <div class="composer"><textarea id="morinInput" maxlength="2000" placeholder="מה תרצה לשאול?"></textarea><button id="morinSend" class="primary">שליחה</button></div>
     </div>
   </div>
 

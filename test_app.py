@@ -74,6 +74,33 @@ def test_mentions_respect_room_membership_and_block():
             app.hub.identity_clients.pop('tag-target',None)
             app.hub.room_members['general'].discard('target-client')
 
+def test_morin_config_and_isolated_history(monkeypatch):
+    tokens=[]
+    for nickname in ('אחת','שתיים'):
+        with client.websocket_connect('/ws') as ws:
+            ws.receive_json()
+            ws.send_json({'type':'hello','profile':{'nickname':nickname,'age':30,'gender':'female'}})
+            while (reply := ws.receive_json())['type'] != 'bootstrap': pass
+            tokens.append(reply['identity_token'])
+    headers={'Authorization':'Bearer '+tokens[0]}
+    monkeypatch.delenv('OPENROUTER_API_KEY',raising=False)
+    assert client.post('/api/morin',json={'message':'שלום'},headers=headers).status_code==503
+    monkeypatch.setenv('OPENROUTER_API_KEY','test-key')
+    monkeypatch.setenv('MORIN_MODEL','test-model')
+    class FakeResponse:
+        def raise_for_status(self): pass
+        def json(self): return {'choices':[{'message':{'content':'שלום לך'}}]}
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def post(self,*args,**kwargs):
+            assert kwargs['headers']['Authorization']=='Bearer test-key'
+            return FakeResponse()
+    monkeypatch.setattr(app.httpx,'AsyncClient',lambda **kwargs:FakeClient())
+    assert client.post('/api/morin',json={'message':'שלום'},headers=headers).json()['reply']=='שלום לך'
+    assert len(client.get('/api/morin/history',headers=headers).json())==2
+    assert client.get('/api/morin/history',headers={'Authorization':'Bearer '+tokens[1]}).json()==[]
+
 def test_private_room_rejects_wrong_password():
     import time
     con = app.db()

@@ -56,6 +56,9 @@ Run `python backup_data.py --data-dir /path/to/persistent-data --output /safe/of
 ## Moderation access
 Set a long random `CHAT_ADMIN_TOKEN` in the server environment. An operator can read pending reports with `GET /api/admin/reports`, mark one reviewed with `POST /api/admin/reports/{id}/review`, or ban its target identity with `POST /api/admin/reports/{id}/ban`. Send `Authorization: Bearer <token>` in each request. These actions require human review. Keep the token out of the frontend and repository. This API is a limited operator interface, not a complete moderation dashboard.
 
+## Built-in Morin assistant
+Set `OPENROUTER_API_KEY` and `MORIN_MODEL` in the server environment to enable the assistant. The key stays on the server. A user's last 20 Morin messages are sent to the configured provider for context; Morin chats are stored in the application database and only returned to the same identity. Without either setting, the assistant returns a clear unavailable response. Choose a model and provider privacy setting suitable for the site's data before enabling public access, and set an API key spending limit. The test suite mocks provider calls and does not exercise the live provider.
+
 
 ## Render free deployment
 - Service type: Web Service
