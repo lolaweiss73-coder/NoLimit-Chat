@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <title>הצ'אט</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="gate" class="modal open">
+    <div class="modal-card gate-card">
+      <div class="eyebrow">גרסת הרצה</div>
+      <h1>הצ'אט</h1>
+      <p class="muted">צ'אט אנונימי למבוגרים. בלי הרשמה, בלי וידאו ובלי שיחות קוליות בגרסה הזאת.</p>
+      <div class="form-grid">
+        <label>כינוי<input id="nickname" maxlength="40" autocomplete="nickname" /></label>
+        <label>גיל<input id="age" type="number" min="18" max="99" inputmode="numeric" /></label>
+        <label>מגדר<select id="gender"><option value="">בחר/י</option><option value="female">אישה</option><option value="male">גבר</option><option value="other">אחר</option></select></label>
+        <label>מחפש/ת<select id="interestedIn"><option value="all">הכול</option><option value="female">נשים</option><option value="male">גברים</option><option value="other">אחר</option></select></label>
+        <label>אזור<select id="region"><option value="unspecified">לא מציין/ת</option><option value="center">מרכז</option><option value="sharon">שרון</option><option value="jerusalem">ירושלים</option><option value="north">צפון</option><option value="south">דרום</option></select></label>
+        <label>סטטוס זוגי<select id="relationshipStatus"><option value="unspecified">לא מציין/ת</option><option value="single">פנוי/ה</option><option value="relationship">בזוגיות</option><option value="married">נשוי/אה</option><option value="open">קשר פתוח</option><option value="poly">פוליאמורי/ת</option><option value="complicated">מורכב</option></select></label>
+      </div>
+      <label class="checkline"><input id="rememberMe" type="checkbox" checked /> זכור את הפרטים במכשיר הזה</label>
+      <label class="checkline"><input id="adultConfirm" type="checkbox" /> אני בן/בת 18 ומעלה</label>
+      <button id="enterBtn" class="primary big">כניסה לצ'אט</button>
+      <p id="gateError" class="error"></p>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand"><span class="status-dot" id="statusDot"></span><strong>הצ'אט</strong><span id="onlineCount" class="pill">0 מחוברים</span></div>
+    <div class="top-actions">
+      <button id="dndBtn" class="ghost">נא לא להפריע: כבוי</button>
+      <button id="settingsBtn" class="ghost">הגדרות</button>
+    </div>
+  </header>
+
+  <nav class="mobile-tabs">
+    <button data-panel="roomsPanel">חדרים</button>
+    <button class="active" data-panel="chatPanel">שיחות</button>
+    <button data-panel="usersPanel">מחוברים</button>
+  </nav>
+
+  <main class="layout">
+    <section id="roomsPanel" class="panel rooms-panel">
+      <div class="panel-head"><div><h2>חדרים</h2><span class="muted small">ציבוריים ופרטיים</span></div><button id="newRoomBtn" class="primary">+ חדר</button></div>
+      <div id="roomsList" class="list"></div>
+    </section>
+
+    <section id="chatPanel" class="panel chat-panel active">
+      <div class="panel-head conversation-head">
+        <div><h2 id="conversationTitle">כללי</h2><span id="conversationMeta" class="muted small">חדר ציבורי</span></div>
+        <button id="conversationMenuBtn" class="ghost hidden">⋮</button>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="messageInput" rows="1" maxlength="4000" placeholder="הודעה"></textarea>
+        <button id="sendBtn" class="primary send">שליחה</button>
+      </div>
+    </section>
+
+    <section id="usersPanel" class="panel users-panel">
+      <div class="panel-head"><div><h2>מחוברים</h2><span class="muted small">חיפוש ומיון חופשי</span></div></div>
+      <div class="toolbar">
+        <input id="userSearch" placeholder="חיפוש לפי כינוי" />
+        <select id="userSort" title="מיון">
+          <option value="femaleFirst">נשים קודם</option>
+          <option value="maleFirst">גברים קודם</option>
+          <option value="youngFirst">צעירים קודם</option>
+          <option value="oldFirst">מבוגרים קודם</option>
+          <option value="newFirst">חדשים קודם</option>
+          <option value="name">כינוי א-ת</option>
+        </select>
+      </div>
+      <div id="usersList" class="list"></div>
+    </section>
+  </main>
+
+  <div id="settingsModal" class="modal">
+    <div class="modal-card">
+      <button class="close" data-close="settingsModal">×</button>
+      <h2>הגדרות</h2>
+      <label>מי יכול לפנות אליי בפרטי<select id="dmPolicy"><option value="any">כולם</option><option value="female">נשים בלבד</option><option value="male">גברים בלבד</option><option value="none">אף אחד</option></select></label>
+      <p class="muted small">הפרטים הבסיסיים נשמרים רק במכשיר אם סימנת זכירה. הודעות הצ'אט אינן נשמרות במסד הנתונים בגרסה הזאת.</p>
+    </div>
+  </div>
+
+  <div id="roomModal" class="modal">
+    <div class="modal-card">
+      <button class="close" data-close="roomModal">×</button>
+      <h2>יצירת חדר</h2>
+      <div class="form-grid">
+        <label>שם החדר<input id="roomName" maxlength="60" /></label>
+        <label>תיאור<input id="roomDescription" maxlength="200" /></label>
+        <label>מגדר מורשה<select id="roomGender"><option value="all">כולם</option><option value="female">נשים</option><option value="male">גברים</option><option value="other">אחר</option></select></label>
+        <label>גיל מינימלי<input id="roomMinAge" type="number" min="18" max="99" value="18" /></label>
+        <label>גיל מקסימלי<input id="roomMaxAge" type="number" min="18" max="99" value="99" /></label>
+        <label>אזור<select id="roomRegion"><option value="all">כל הארץ</option><option value="center">מרכז</option><option value="sharon">שרון</option><option value="jerusalem">ירושלים</option><option value="north">צפון</option><option value="south">דרום</option></select></label>
+        <label>סטטוס זוגי<select id="roomRelationship"><option value="all">כולם</option><option value="single">פנויים</option><option value="relationship">בזוגיות</option><option value="married">נשואים</option><option value="open">קשר פתוח</option><option value="poly">פוליאמוריים</option><option value="complicated">מורכב</option></select></label>
+        <label class="checkline"><input id="roomPrivate" type="checkbox" /> חדר פרטי עם סיסמה</label>
+        <label id="roomPasswordWrap" class="hidden">סיסמה<input id="roomPassword" type="password" maxlength="100" /></label>
+      </div>
+      <button id="createRoomBtn" class="primary big">צור חדר</button>
+    </div>
+  </div>
+
+  <div id="userModal" class="modal">
+    <div class="modal-card">
+      <button class="close" data-close="userModal">×</button>
+      <div id="userCard"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
