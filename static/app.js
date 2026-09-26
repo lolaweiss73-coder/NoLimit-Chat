@@ -37,6 +37,15 @@ async function showPhotos(ownerId,targetId,shareTo){
   }catch{target.textContent='לא ניתן לטעון תמונות';}
 }
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function formatText(value){
+  return escapeHtml(value).replace(/https?:\/\/[^\s&lt;&gt;]+/g,raw=>{
+    try{const url=new URL(raw.replace(/&amp;/g,'&'));if(!['http:','https:'].includes(url.protocol))return raw;return `<a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">${raw}</a>`;}catch{return raw;}
+  });
+}
+function youtubePreview(text){
+  const match=String(text).match(/https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?[^\s]*v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return match?`<button class="ghost" data-youtube="${match[1]}">הצג סרטון YouTube</button>`:'';
+}
 
 function loadSaved(){
   const p = JSON.parse(localStorage.getItem('chatProfile') || 'null');
@@ -79,6 +88,8 @@ function handle(m){
     else if(m.message.from_identity!==state.self.identity_id) toast(`הודעה חדשה מ${m.message.profile.nickname}`);
   }
   else if(m.type==='conversation'){state.messages.set('dm:'+m.identity_id,m.messages);state.inbox=m.inbox;renderInbox();if(keyForActive()==='dm:'+m.identity_id)renderMessages();}
+  else if(m.type==='read_receipt'){state.messages.set('dm:'+m.identity_id,m.messages);if(keyForActive()==='dm:'+m.identity_id)renderMessages();}
+  else if(m.type==='typing'&&keyForActive()==='dm:'+m.identity_id){$('#conversationMeta').textContent='מקליד/ה...';setTimeout(()=>renderConversation(),1800);}
   else if(m.type==='friends'){state.friends=m.friends;renderFriends();}
   else if(m.type==='blocked'){ state.blocked.add(m.target_id); closeModal('userModal'); renderUsers(); toast('המשתמש נחסם'); }
   else if(m.type==='blocked_by'){ state.blocked.add(m.target_id); renderUsers(); if(state.active.type==='dm'&&state.active.id===m.target_id){state.active={type:'room',id:'general'};renderConversation();} toast('התקשורת עם משתמש נחסמה'); }
@@ -131,7 +142,9 @@ function renderConversation(){
 }
 function renderMessages(){
   const arr=state.messages.get(keyForActive())||[];
-  $('#messages').innerHTML=arr.map(m=>`<div class="msg ${(m.from_identity?m.from_identity===state.self?.identity_id:m.from===state.clientId)?'me':''}"><div class="meta">${escapeHtml(m.profile?.nickname||'')} · ${fmtTime(m.ts)}</div><div class="body">${escapeHtml(m.text)}</div></div>`).join('');
+  $('#messages').innerHTML=arr.map(m=>`<div class="msg ${(m.from_identity?m.from_identity===state.self?.identity_id:m.from===state.clientId)?'me':''}"><div class="meta">${escapeHtml(m.profile?.nickname||'')} · ${fmtTime(m.ts)} ${m.read_at&&m.from_identity===state.self?.identity_id?'· נקראה':''}</div><div class="body">${formatText(m.text)}</div>${youtubePreview(m.text)}${m.contact_card?`<div class="badge">${escapeHtml(m.contact_card.kind)}: ${escapeHtml(m.contact_card.value)}</div>`:''}${m.photo_id?`<button class="ghost" data-photo="${escapeHtml(m.photo_id)}">הצג תמונה</button>`:''}</div>`).join('');
+  document.querySelectorAll('[data-youtube]').forEach(button=>button.onclick=()=>{const frame=document.createElement('iframe');frame.src='https://www.youtube-nocookie.com/embed/'+button.dataset.youtube;frame.title='YouTube';frame.allowFullscreen=true;button.replaceWith(frame);});
+  document.querySelectorAll('[data-photo]').forEach(button=>button.onclick=async()=>{const response=await fetch('/api/photos/'+button.dataset.photo,{headers:authHeaders()});if(response.ok){const image=document.createElement('img');image.src=URL.createObjectURL(await response.blob());image.style.maxWidth='100%';image.onload=()=>URL.revokeObjectURL(image.src);button.replaceWith(image);}});
   $('#messages').scrollTop=$('#messages').scrollHeight;
 }
 function joinRoom(id){
@@ -164,6 +177,9 @@ $('#enterBtn').onclick=()=>{
 };
 $('#sendBtn').onclick=()=>{const text=$('#messageInput').value.trim();if(!text)return;if(state.active.type==='room')send({type:'room_message',room_id:state.active.id,text});else send({type:'dm',identity_id:state.active.id,text});$('#messageInput').value='';};
 $('#messageInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#sendBtn').click();}});
+let lastTyping=0;$('#messageInput').addEventListener('input',()=>{if(state.active.type==='dm'&&Date.now()-lastTyping>1500){send({type:'typing',identity_id:state.active.id});lastTyping=Date.now();}});
+$('#roomPhotoInput').onchange=async()=>{const file=$('#roomPhotoInput').files[0];if(!file||state.active.type!=='room')return;const form=new FormData();form.append('file',file);const response=await fetch('/api/photos?visibility=public',{method:'POST',headers:authHeaders(),body:form});if(response.ok){const photo=await response.json();send({type:'room_message',room_id:state.active.id,text:$('#messageInput').value.trim(),photo_id:photo.id});$('#messageInput').value='';}else toast('העלאת התמונה נכשלה');$('#roomPhotoInput').value='';};
+$('#contactCardBtn').onclick=()=>{if(state.active.type!=='dm'){toast('כרטיס קשר נשלח בשיחה פרטית');return;}const kind=prompt('סוג: phone, whatsapp, telegram, email, website');if(!['phone','whatsapp','telegram','email','website'].includes(kind))return;const value=prompt('פרט הקשר');if(value)send({type:'dm',identity_id:state.active.id,contact_card:{kind,value}});};
 $('#userSearch').oninput=renderUsers; $('#userSort').onchange=renderUsers;
 $('#settingsBtn').onclick=()=>openModal('settingsModal');
 $('#dmPolicy').onchange=()=>send({type:'profile_update',dm_policy:$('#dmPolicy').value});

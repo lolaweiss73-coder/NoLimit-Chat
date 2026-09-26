@@ -72,6 +72,8 @@ def init_db() -> None:
     con.execute("CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, visibility TEXT NOT NULL, created_at REAL NOT NULL)")
     con.execute("CREATE TABLE IF NOT EXISTS photo_grants (photo_id TEXT NOT NULL, recipient_id TEXT NOT NULL, PRIMARY KEY(photo_id,recipient_id))")
     con.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
+    if "contact_card" not in {column[1] for column in con.execute("PRAGMA table_info(messages)")}:
+        con.execute("ALTER TABLE messages ADD COLUMN contact_card TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS messages_recipient ON messages(recipient_id,created_at)")
     existing = con.execute("SELECT COUNT(*) AS c FROM rooms").fetchone()["c"]
     if not existing:
@@ -163,9 +165,9 @@ class Hub:
 
     def conversation(self, identity_id: str, other_id: str) -> list[dict[str, Any]]:
         con = db()
-        rows = con.execute("SELECT m.id,m.sender_id,m.recipient_id,m.text,m.created_at,m.read_at,i.nickname FROM messages m JOIN identities i ON i.id=m.sender_id WHERE (m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?) ORDER BY m.created_at DESC LIMIT 100", (identity_id,other_id,other_id,identity_id)).fetchall()
+        rows = con.execute("SELECT m.id,m.sender_id,m.recipient_id,m.text,m.created_at,m.read_at,m.contact_card,i.nickname FROM messages m JOIN identities i ON i.id=m.sender_id WHERE (m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?) ORDER BY m.created_at DESC LIMIT 100", (identity_id,other_id,other_id,identity_id)).fetchall()
         con.close()
-        return [{"id":r["id"],"from_identity":r["sender_id"],"to_identity":r["recipient_id"],"text":r["text"],"ts":r["created_at"],"read_at":r["read_at"],"profile":{"nickname":r["nickname"]}} for r in reversed(rows)]
+        return [{"id":r["id"],"from_identity":r["sender_id"],"to_identity":r["recipient_id"],"text":r["text"],"ts":r["created_at"],"read_at":r["read_at"],"contact_card":json.loads(r["contact_card"]) if r["contact_card"] else None,"profile":{"nickname":r["nickname"]}} for r in reversed(rows)]
 
     def inbox(self, identity_id: str) -> list[dict[str, Any]]:
         con = db()
@@ -432,10 +434,20 @@ async def websocket_endpoint(ws: WebSocket):
                 exists = con.execute("SELECT 1 FROM identities WHERE id=?",(other_id,)).fetchone()
                 if exists:
                     con.execute("UPDATE messages SET read_at=? WHERE sender_id=? AND recipient_id=? AND read_at IS NULL",(time.time(),other_id,identity_id))
+                    changed = con.total_changes
                     con.commit()
                 con.close()
                 if exists:
                     await hub.send(client_id,{"type":"conversation","identity_id":other_id,"messages":hub.conversation(identity_id,other_id),"inbox":hub.inbox(identity_id)})
+                    if changed and (sender_client := hub.identity_clients.get(other_id)):
+                        await hub.send(sender_client,{"type":"read_receipt","identity_id":identity_id,"messages":hub.conversation(other_id,identity_id)})
+
+            elif mtype == "typing":
+                target_identity = str(data.get("identity_id", ""))
+                target_client = hub.identity_clients.get(target_identity)
+                if target_client and target_client != client_id:
+                    ok, _ = hub.can_contact(client_id,target_client)
+                    if ok: await hub.send(target_client,{"type":"typing","identity_id":hub.identity_for(client_id)})
 
             elif mtype == "join_room":
                 room_id = str(data.get("room_id", ""))
@@ -453,8 +465,14 @@ async def websocket_endpoint(ws: WebSocket):
             elif mtype == "room_message":
                 room_id = str(data.get("room_id", ""))
                 text = str(data.get("text", "")).strip()[:4000]
-                if not text or client_id not in hub.room_members.get(room_id, set()):
+                photo_id = str(data.get("photo_id", ""))
+                if not text and not photo_id or client_id not in hub.room_members.get(room_id, set()):
                     continue
+                if photo_id:
+                    con = db()
+                    permitted = con.execute("SELECT 1 FROM photos WHERE id=? AND owner_id=? AND visibility='public'",(photo_id,hub.identity_for(client_id))).fetchone()
+                    con.close()
+                    if not permitted: continue
                 payload = {
                     "type": "room_message",
                     "room_id": room_id,
@@ -463,6 +481,7 @@ async def websocket_endpoint(ws: WebSocket):
                         "from": client_id,
                         "profile": hub.profiles[client_id],
                         "text": text,
+                        "photo_id": photo_id,
                         "ts": time.time(),
                     },
                 }
@@ -472,7 +491,13 @@ async def websocket_endpoint(ws: WebSocket):
                 target_identity = str(data.get("identity_id", ""))
                 target_id = hub.identity_clients.get(target_identity) if target_identity else str(data.get("target_id", ""))
                 text = str(data.get("text", "")).strip()[:4000]
-                if not text:
+                card = data.get("contact_card")
+                if card is not None:
+                    if not isinstance(card,dict) or card.get("kind") not in {"phone","whatsapp","telegram","email","website"} or not isinstance(card.get("value"),str) or not card["value"].strip() or len(card["value"])>200:
+                        await hub.send(client_id,{"type":"error","message":"כרטיס קשר לא תקין"})
+                        continue
+                    card = {"kind":card["kind"],"value":card["value"].strip()}
+                if not text and not card:
                     continue
                 if target_id:
                     ok, reason = hub.can_contact(client_id, target_id)
@@ -499,10 +524,11 @@ async def websocket_endpoint(ws: WebSocket):
                     "to_identity": target_identity,
                     "profile": hub.profiles[client_id],
                     "text": text,
+                    "contact_card": card,
                     "ts": time.time(),
                 }
                 con = db()
-                con.execute("INSERT INTO messages (id,sender_id,recipient_id,text,created_at) VALUES (?,?,?,?,?)",(msg["id"],sender_identity,target_identity,text,msg["ts"]))
+                con.execute("INSERT INTO messages (id,sender_id,recipient_id,text,created_at,contact_card) VALUES (?,?,?,?,?,?)",(msg["id"],sender_identity,target_identity,text,msg["ts"],json.dumps(card) if card else None))
                 con.commit()
                 con.close()
                 if target_id:
