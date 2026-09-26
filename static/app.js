@@ -18,6 +18,24 @@ function avatarClass(g){ return g==='female'?'female':g==='male'?'male':'other';
 function initials(name){ return (name || '?').trim().charAt(0).toUpperCase(); }
 function fmtTime(ts){ return new Date(ts*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'}); }
 function keyForActive(){ return state.active.type+':'+state.active.id; }
+function authHeaders(){return {Authorization:'Bearer '+localStorage.getItem('chatIdentityToken')};}
+async function showPhotos(ownerId,targetId,shareTo){
+  const target=$('#'+targetId); if(!target)return;
+  try{
+    const response=await fetch('/api/profiles/'+encodeURIComponent(ownerId)+'/photos',{headers:authHeaders()});
+    if(!response.ok)throw Error('photos');
+    const photos=await response.json(); target.replaceChildren();
+    for(const p of photos){
+      const imageResponse=await fetch('/api/photos/'+p.id,{headers:authHeaders()});
+      if(!imageResponse.ok)continue;
+      const image=document.createElement('img'); image.src=URL.createObjectURL(await imageResponse.blob());image.width=90;image.alt='תמונת פרופיל';image.onload=()=>URL.revokeObjectURL(image.src);target.append(image);
+      if(shareTo&&p.visibility==='private'){
+        const button=document.createElement('button');button.textContent='שתף תמונה זו';button.className='ghost';
+        button.onclick=async()=>{const result=await fetch(`/api/photos/${p.id}/share/${encodeURIComponent(shareTo)}`,{method:'POST',headers:authHeaders()});toast(result.ok?'התמונה שותפה':'השיתוף נכשל');};target.append(button);
+      }
+    }
+  }catch{target.textContent='לא ניתן לטעון תמונות';}
+}
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 
 function loadSaved(){
@@ -125,6 +143,10 @@ function openUser(id){
   const u=state.users.find(x=>x.client_id===id); if(!u)return;
   $('#userCard').innerHTML=`<div class="user-card-head"><div class="avatar ${avatarClass(u.gender)}">${escapeHtml(initials(u.nickname))}</div><div><h2>${escapeHtml(u.nickname)}</h2><div class="muted">${u.age} · ${labels.gender[u.gender]} · ${labels.region[u.region]||u.region}</div></div></div><p>${escapeHtml(u.description||'')}</p><p>סטטוס: ${labels.relationship[u.relationship_status]||'לא צוין'}${u.dnd?' · נא לא להפריע':''}</p><div class="actions"><button id="dmUser" class="primary">פתח שיחה</button><button id="friendUser" class="ghost">בקשת חברות</button><button id="ignoreUser" class="ghost">התעלם</button><button id="reportUser" class="ghost">דווח</button><button id="blockUser" class="danger">חסום</button></div>`;
   openModal('userModal');
+  const photoSection=document.createElement('div');photoSection.id='userPhotos';$('#userCard').prepend(photoSection);showPhotos(u.identity_id,'userPhotos');
+  const shareButton=document.createElement('button');shareButton.className='ghost';shareButton.textContent='שתף תמונה פרטית שלי';shareButton.onclick=()=>{
+    let area=$('#sharePhotos');if(!area){area=document.createElement('div');area.id='sharePhotos';$('#userCard').prepend(area);}showPhotos(state.self.identity_id,'sharePhotos',u.identity_id);
+  };$('#userCard').prepend(shareButton);
   $('#dmUser').onclick=()=>{closeModal('userModal');openConversation(u.identity_id);};
   $('#friendUser').onclick=()=>{send({type:'friend_request',identity_id:u.identity_id});closeModal('userModal');};
   $('#ignoreUser').onclick=()=>{state.ignored.add(id);localStorage.setItem('ignoredUsers',JSON.stringify([...state.ignored]));closeModal('userModal');renderUsers();toast('המשתמש הוסתר אצלך');};
@@ -146,6 +168,8 @@ $('#userSearch').oninput=renderUsers; $('#userSort').onchange=renderUsers;
 $('#settingsBtn').onclick=()=>openModal('settingsModal');
 $('#dmPolicy').onchange=()=>send({type:'profile_update',dm_policy:$('#dmPolicy').value});
 $('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value});closeModal('settingsModal');};
+$('#uploadPhotoBtn').onclick=async()=>{const file=$('#photoUpload').files[0];if(!file)return;const form=new FormData();form.append('file',file);const result=await fetch('/api/photos?visibility='+$('#photoVisibility').value,{method:'POST',headers:authHeaders(),body:form});toast(result.ok?'התמונה עלתה':'העלאה נכשלה');if(result.ok)showPhotos(state.self.identity_id,'myPhotos');};
+$('#settingsBtn').onclick=()=>{openModal('settingsModal');if(state.self)showPhotos(state.self.identity_id,'myPhotos');};
 $('#dndBtn').onclick=()=>{state.dnd=!state.dnd;$('#dndBtn').textContent=`נא לא להפריע: ${state.dnd?'פעיל':'כבוי'}`;send({type:'profile_update',dnd:state.dnd});};
 $('#newRoomBtn').onclick=()=>openModal('roomModal');
 $('#roomPrivate').onchange=()=>$('#roomPasswordWrap').classList.toggle('hidden',!$('#roomPrivate').checked);

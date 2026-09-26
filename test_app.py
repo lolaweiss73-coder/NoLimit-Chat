@@ -1,4 +1,6 @@
 import os
+import io
+from PIL import Image
 from fastapi.testclient import TestClient
 import app
 
@@ -102,3 +104,22 @@ def test_friend_request_acceptance():
         bob.send_json({'type':'friend_reply','identity_id':alice_id,'accept':True})
         while (reply := bob.receive_json())['type'] != 'friends' or reply['friends'][0]['status'] != 'accepted': pass
         assert reply['friends'][0]['status'] == 'accepted'
+
+def test_private_photo_only_visible_after_grant():
+    identities=[]
+    for nickname in ('צלמת','צופה'):
+        with client.websocket_connect('/ws') as ws:
+            ws.receive_json()
+            ws.send_json({'type':'hello','profile':{'nickname':nickname,'age':30,'gender':'female'}})
+            while (reply := ws.receive_json())['type'] != 'bootstrap': pass
+            identities.append((reply['self']['identity_id'],reply['identity_token']))
+    picture=io.BytesIO();Image.new('RGB',(8,8),'blue').save(picture,'PNG')
+    owner_id,owner_token=identities[0]
+    viewer_id,viewer_token=identities[1]
+    uploaded=client.post('/api/photos?visibility=private',files={'file':('image.png',picture.getvalue(),'image/png')},headers={'Authorization':'Bearer '+owner_token})
+    assert uploaded.status_code == 200
+    photo_id=uploaded.json()['id']
+    assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
+    assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
+    assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+owner_token}).status_code == 200
+    assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 200

@@ -4,6 +4,7 @@ import asyncio
 import json
 import hashlib
 import secrets
+import io
 import sqlite3
 import time
 import uuid
@@ -11,13 +12,16 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Header, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, Response
+from PIL import Image, UnidentifiedImageError
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "chat.db"
 STATIC_DIR = BASE_DIR / "static"
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="No Limit Chat", version="0.1.1")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -65,6 +69,8 @@ def init_db() -> None:
         con.execute("ALTER TABLE identities ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'any'")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
     con.execute("CREATE TABLE IF NOT EXISTS friendships (requester_id TEXT NOT NULL, recipient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, PRIMARY KEY(requester_id,recipient_id))")
+    con.execute("CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, visibility TEXT NOT NULL, created_at REAL NOT NULL)")
+    con.execute("CREATE TABLE IF NOT EXISTS photo_grants (photo_id TEXT NOT NULL, recipient_id TEXT NOT NULL, PRIMARY KEY(photo_id,recipient_id))")
     con.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL, text TEXT NOT NULL, created_at REAL NOT NULL, read_at REAL)")
     con.execute("CREATE INDEX IF NOT EXISTS messages_recipient ON messages(recipient_id,created_at)")
     existing = con.execute("SELECT COUNT(*) AS c FROM rooms").fetchone()["c"]
@@ -201,6 +207,80 @@ class Hub:
 
 
 hub = Hub()
+
+
+def identity_from_header(authorization: str | None) -> str:
+    token = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(401, "Identity token required")
+    con = db()
+    row = con.execute("SELECT id FROM identities WHERE token_hash=?",(hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+    con.close()
+    if not row: raise HTTPException(401, "Invalid identity token")
+    return row["id"]
+
+
+def visible_photos(viewer_id: str, owner_id: str) -> list[dict[str, Any]]:
+    con = db()
+    rows = con.execute("SELECT p.id,p.visibility FROM photos p WHERE p.owner_id=? AND (p.visibility='public' OR p.owner_id=? OR EXISTS (SELECT 1 FROM photo_grants g WHERE g.photo_id=p.id AND g.recipient_id=?)) ORDER BY p.created_at",(owner_id,viewer_id,viewer_id)).fetchall()
+    con.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/photos")
+async def upload_photo(file: UploadFile = File(...), visibility: str = "private", authorization: str | None = Header(default=None)):
+    owner_id = identity_from_header(authorization)
+    if visibility not in {"public","private"}: raise HTTPException(400, "Invalid visibility")
+    content = await file.read(5 * 1024 * 1024 + 1)
+    if len(content) > 5 * 1024 * 1024: raise HTTPException(413, "Image too large")
+    try:
+        img = Image.open(io.BytesIO(content))
+        img.verify()
+        img = Image.open(io.BytesIO(content))
+        if img.width * img.height > 20_000_000: raise HTTPException(413, "Image dimensions too large")
+        img.thumbnail((1600,1600))
+        if img.mode not in {"RGB","L"}: img = img.convert("RGB")
+        output = io.BytesIO()
+        img.save(output,format="JPEG",quality=85)
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(400, "Invalid image")
+    photo_id = uuid.uuid4().hex
+    (UPLOAD_DIR / photo_id).write_bytes(output.getvalue())
+    con = db()
+    con.execute("INSERT INTO photos (id,owner_id,visibility,created_at) VALUES (?,?,?,?)",(photo_id,owner_id,visibility,time.time()))
+    con.commit(); con.close()
+    return {"id":photo_id,"visibility":visibility}
+
+
+@app.get("/api/photos/{photo_id}")
+async def read_photo(photo_id: str, authorization: str | None = Header(default=None)):
+    viewer_id = identity_from_header(authorization)
+    con = db()
+    row = con.execute("SELECT owner_id FROM photos WHERE id=?",(photo_id,)).fetchone()
+    con.close()
+    if not row or not any(p["id"] == photo_id for p in visible_photos(viewer_id,row["owner_id"])):
+        raise HTTPException(404, "Photo unavailable")
+    path = UPLOAD_DIR / photo_id
+    if not path.exists(): raise HTTPException(404, "Photo unavailable")
+    return Response(path.read_bytes(),media_type="image/jpeg",headers={"Cache-Control":"private, no-store"})
+
+
+@app.get("/api/profiles/{owner_id}/photos")
+async def list_photos(owner_id: str, authorization: str | None = Header(default=None)):
+    return visible_photos(identity_from_header(authorization),owner_id)
+
+
+@app.post("/api/photos/{photo_id}/share/{recipient_id}")
+async def share_photo(photo_id: str, recipient_id: str, authorization: str | None = Header(default=None)):
+    owner_id = identity_from_header(authorization)
+    con = db()
+    photo = con.execute("SELECT visibility FROM photos WHERE id=? AND owner_id=?",(photo_id,owner_id)).fetchone()
+    recipient = con.execute("SELECT id FROM identities WHERE id=?",(recipient_id,)).fetchone()
+    if not photo or not recipient or photo["visibility"] != "private":
+        con.close(); raise HTTPException(404, "Photo or recipient unavailable")
+    con.execute("INSERT OR IGNORE INTO photo_grants (photo_id,recipient_id) VALUES (?,?)",(photo_id,recipient_id))
+    con.commit(); con.close()
+    return {"ok":True}
 
 
 @app.get("/")
