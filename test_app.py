@@ -1,10 +1,18 @@
 import os
 import io
+import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 import app
 
 client = TestClient(app.app)
+
+@pytest.fixture(autouse=True)
+def fresh_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, 'DB_PATH', tmp_path / 'chat.db')
+    monkeypatch.setattr(app, 'UPLOAD_DIR', tmp_path / 'uploads')
+    app.UPLOAD_DIR.mkdir()
+    app.init_db()
 
 def test_health():
     r = client.get('/api/health')
@@ -17,6 +25,20 @@ def test_home():
     r = client.get('/')
     assert r.status_code == 200
     assert "הצ'אט" in r.text
+
+def test_service_worker_does_not_cache_private_api():
+    script = client.get('/service-worker.js').text
+    assert "CORE.includes(url.pathname)" in script
+    assert "caches.delete(key)" in script
+
+def test_private_room_rejects_wrong_password():
+    import time
+    con = app.db()
+    con.execute("INSERT INTO rooms (id,name,is_private,password,created_at) VALUES (?,?,?,?,?)",('locked','סגור',1,'secret',time.time()))
+    con.commit(); con.close()
+    profile={'age':30,'gender':'female','region':'all','relationship_status':'all'}
+    assert app.hub.room_allowed('locked',profile,'wrong')[0] is False
+    assert app.hub.room_allowed('locked',profile,'secret')[0] is True
 
 def test_ws_join_and_room_message():
     with client.websocket_connect('/ws') as ws:
@@ -123,6 +145,35 @@ def test_private_photo_only_visible_after_grant():
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+owner_token}).status_code == 200
     assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 200
+
+def test_offline_message_respects_block_and_policy():
+    with client.websocket_connect('/ws') as recipient:
+        recipient.receive_json()
+        recipient.send_json({'type':'hello','profile':{'nickname':'נמען','age':30,'gender':'female','dm_policy':'none'}})
+        while (reply := recipient.receive_json())['type'] != 'bootstrap': pass
+        recipient_id=reply['self']['identity_id']
+    with client.websocket_connect('/ws') as sender:
+        sender.receive_json()
+        sender.send_json({'type':'hello','profile':{'nickname':'שולח','age':30,'gender':'male'}})
+        while (reply := sender.receive_json())['type'] != 'bootstrap': pass
+        sender_id=reply['self']['identity_id']
+        sender.send_json({'type':'dm','identity_id':recipient_id,'text':'אסור'})
+        while (reply := sender.receive_json())['type'] != 'error': pass
+        assert 'לא ניתן' in reply['message']
+    con=app.db()
+    assert con.execute('SELECT COUNT(*) FROM messages').fetchone()[0]==0
+    con.execute("UPDATE identities SET dm_policy='any' WHERE id=?",(recipient_id,))
+    con.execute('INSERT INTO identity_blocks (blocker_id,blocked_id) VALUES (?,?)',(recipient_id,sender_id))
+    con.commit();con.close()
+    with client.websocket_connect('/ws') as sender:
+        sender.receive_json()
+        sender.send_json({'type':'hello','profile':{'nickname':'שולח חדש','age':30,'gender':'male'}})
+        while (reply := sender.receive_json())['type'] != 'bootstrap': pass
+        new_sender_id=reply['self']['identity_id']
+        con=app.db();con.execute('INSERT INTO identity_blocks (blocker_id,blocked_id) VALUES (?,?)',(recipient_id,new_sender_id));con.commit();con.close()
+        sender.send_json({'type':'dm','identity_id':recipient_id,'text':'אסור גם עכשיו'})
+        while (reply := sender.receive_json())['type'] != 'error': pass
+    con=app.db();assert con.execute('SELECT COUNT(*) FROM messages').fetchone()[0]==0;con.close()
 
 def test_visibility_and_distinct_worlds():
     with client.websocket_connect('/ws') as hidden:
