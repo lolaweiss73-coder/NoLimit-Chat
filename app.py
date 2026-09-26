@@ -67,6 +67,9 @@ def init_db() -> None:
     con.execute("CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, nickname TEXT NOT NULL, age INTEGER NOT NULL, gender TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', dm_policy TEXT NOT NULL DEFAULT 'any', created_at REAL NOT NULL)")
     if "dm_policy" not in {column[1] for column in con.execute("PRAGMA table_info(identities)")}:
         con.execute("ALTER TABLE identities ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'any'")
+    for column, ddl in (("worlds","TEXT NOT NULL DEFAULT '[]'"),("visible_to","TEXT NOT NULL DEFAULT 'all'")):
+        if column not in {entry[1] for entry in con.execute("PRAGMA table_info(identities)")}:
+            con.execute(f"ALTER TABLE identities ADD COLUMN {column} {ddl}")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
     con.execute("CREATE TABLE IF NOT EXISTS friendships (requester_id TEXT NOT NULL, recipient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, PRIMARY KEY(requester_id,recipient_id))")
     con.execute("CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, visibility TEXT NOT NULL, created_at REAL NOT NULL)")
@@ -115,13 +118,20 @@ class Hub:
         ids = recipients if recipients is not None else list(self.clients)
         await asyncio.gather(*(self.send(cid, payload) for cid in ids), return_exceptions=True)
 
-    def online_snapshot(self) -> list[dict[str, Any]]:
+    def online_snapshot(self, viewer_id: str | None = None) -> list[dict[str, Any]]:
         result = []
+        viewer = self.profiles.get(viewer_id or "", {})
         for cid, p in self.profiles.items():
+            allowed = p.get("visible_to","all")
+            if viewer_id and viewer_id != cid and allowed != "all" and viewer.get("gender") != allowed:
+                continue
             item = dict(p)
             item["client_id"] = cid
             result.append(item)
         return result
+
+    async def broadcast_presence(self) -> None:
+        await asyncio.gather(*(self.send(cid,{"type":"presence","users":self.online_snapshot(cid)}) for cid in list(self.clients)),return_exceptions=True)
 
     def room_snapshot(self) -> list[dict[str, Any]]:
         con = db()
@@ -335,7 +345,7 @@ async def websocket_endpoint(ws: WebSocket):
                 token = str(data.get("identity_token") or "")
                 token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
                 con = db()
-                identity = con.execute("SELECT id,nickname,age,gender,description,dm_policy FROM identities WHERE token_hash=?", (token_hash,)).fetchone() if token else None
+                identity = con.execute("SELECT id,nickname,age,gender,description,dm_policy,worlds,visible_to FROM identities WHERE token_hash=?", (token_hash,)).fetchone() if token else None
                 if identity:
                     identity_id = identity["id"]
                     nickname, age, gender = identity["nickname"], identity["age"], identity["gender"]
@@ -350,6 +360,8 @@ async def websocket_endpoint(ws: WebSocket):
                 clean = {
                     "identity_id": identity_id,
                     "description": identity["description"] if identity else "",
+                    "worlds": json.loads(identity["worlds"]) if identity else [],
+                    "visible_to": identity["visible_to"] if identity else "all",
                     "nickname": nickname,
                     "age": min(age, 99),
                     "gender": gender,
@@ -367,14 +379,14 @@ async def websocket_endpoint(ws: WebSocket):
                 await hub.send(client_id, {
                     "type": "bootstrap",
                     "self": {**clean, "client_id": client_id},
-                    "users": hub.online_snapshot(),
+                    "users": hub.online_snapshot(client_id),
                     "rooms": hub.room_snapshot(),
                     "active_room": "general",
                     "identity_token": token,
                     "inbox": hub.inbox(identity_id),
                     "friends": hub.friendships(identity_id),
                 })
-                await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
+                await hub.broadcast_presence()
                 await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})
                 continue
 
@@ -391,12 +403,17 @@ async def websocket_endpoint(ws: WebSocket):
                     p["dnd"] = bool(data["dnd"])
                 if "description" in data:
                     p["description"] = str(data["description"]).strip()[:500]
+                if "worlds" in data:
+                    worlds = data["worlds"]
+                    if isinstance(worlds,list): p["worlds"] = [w for w in worlds if w in {"vanilla","kinky","soteh"}][:3]
+                if data.get("visible_to") in {"all","female","male","other"}:
+                    p["visible_to"] = data["visible_to"]
                 if p["dm_policy"] not in {"any","female","male","none"}: p["dm_policy"] = "any"
                 con = db()
-                con.execute("UPDATE identities SET dm_policy=?,description=? WHERE id=?",(p["dm_policy"],p["description"],p["identity_id"]))
+                con.execute("UPDATE identities SET dm_policy=?,description=?,worlds=?,visible_to=? WHERE id=?",(p["dm_policy"],p["description"],json.dumps(p["worlds"]),p["visible_to"],p["identity_id"]))
                 con.commit()
                 con.close()
-                await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
+                await hub.broadcast_presence()
 
             elif mtype == "friend_request":
                 target_identity = str(data.get("identity_id", ""))
@@ -616,5 +633,5 @@ async def websocket_endpoint(ws: WebSocket):
             hub.blocked.pop(client_id, None)
             for s in hub.blocked.values():
                 s.discard(client_id)
-        await hub.broadcast({"type": "presence", "users": hub.online_snapshot()})
+        await hub.broadcast_presence()
         await hub.broadcast({"type": "rooms", "rooms": hub.room_snapshot()})

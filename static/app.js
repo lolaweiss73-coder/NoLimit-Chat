@@ -70,7 +70,7 @@ function handle(m){
   else if(m.type==='bootstrap'){
     state.self=m.self; state.users=m.users; state.rooms=m.rooms; state.inbox=m.inbox||[]; state.friends=m.friends||[]; state.active={type:'room',id:m.active_room};
     localStorage.setItem('chatIdentityToken',m.identity_token);
-    $('#dmPolicy').value=state.self.dm_policy||'any'; $('#profileDescription').value=state.self.description||''; closeModal('gate'); renderAll();
+    $('#dmPolicy').value=state.self.dm_policy||'any'; $('#profileDescription').value=state.self.description||'';$('#visibleTo').value=state.self.visible_to||'all';document.querySelectorAll('[name=world]').forEach(el=>el.checked=(state.self.worlds||[]).includes(el.value));closeModal('gate'); renderAll();
   }
   else if(m.type==='presence'){ state.users=m.users; renderUsers(); renderInbox(); $('#onlineCount').textContent=`${state.users.length} מחוברים`; }
   else if(m.type==='rooms'){ state.rooms=m.rooms; renderRooms(); }
@@ -115,6 +115,7 @@ function renderRooms(){
 }
 function sortedUsers(){
   const q=$('#userSearch').value.trim().toLowerCase(); let arr=state.users.filter(u=>u.client_id!==state.clientId&&!state.ignored.has(u.client_id)&&!state.blocked.has(u.client_id));
+  const world=$('#worldFilter').value;if(world!=='all')arr=arr.filter(u=>(u.worlds||[]).includes(world));
   if(q) arr=arr.filter(u=>u.nickname.toLowerCase().includes(q));
   const sort=$('#userSort').value; const genderRank=(u,first)=>u.gender===first?0:u.gender==='other'?2:1;
   arr.sort((a,b)=>{
@@ -154,7 +155,7 @@ function joinRoom(id){
 }
 function openUser(id){
   const u=state.users.find(x=>x.client_id===id); if(!u)return;
-  $('#userCard').innerHTML=`<div class="user-card-head"><div class="avatar ${avatarClass(u.gender)}">${escapeHtml(initials(u.nickname))}</div><div><h2>${escapeHtml(u.nickname)}</h2><div class="muted">${u.age} · ${labels.gender[u.gender]} · ${labels.region[u.region]||u.region}</div></div></div><p>${escapeHtml(u.description||'')}</p><p>סטטוס: ${labels.relationship[u.relationship_status]||'לא צוין'}${u.dnd?' · נא לא להפריע':''}</p><div class="actions"><button id="dmUser" class="primary">פתח שיחה</button><button id="friendUser" class="ghost">בקשת חברות</button><button id="ignoreUser" class="ghost">התעלם</button><button id="reportUser" class="ghost">דווח</button><button id="blockUser" class="danger">חסום</button></div>`;
+  $('#userCard').innerHTML=`<div class="user-card-head"><div class="avatar ${avatarClass(u.gender)}">${escapeHtml(initials(u.nickname))}</div><div><h2>${escapeHtml(u.nickname)}</h2><div class="muted">${u.age} · ${labels.gender[u.gender]} · ${labels.region[u.region]||u.region}</div></div></div><p>${escapeHtml(u.description||'')}</p><p>${(u.worlds||[]).map(w=>({vanilla:'ונילה',kinky:'קינקי',soteh:'סוטה'}[w])).join(' · ')}</p><p>סטטוס: ${labels.relationship[u.relationship_status]||'לא צוין'}${u.dnd?' · נא לא להפריע':''}</p><div class="actions"><button id="dmUser" class="primary">פתח שיחה</button><button id="friendUser" class="ghost">בקשת חברות</button><button id="ignoreUser" class="ghost">התעלם</button><button id="reportUser" class="ghost">דווח</button><button id="blockUser" class="danger">חסום</button></div>`;
   openModal('userModal');
   const photoSection=document.createElement('div');photoSection.id='userPhotos';$('#userCard').prepend(photoSection);showPhotos(u.identity_id,'userPhotos');
   const shareButton=document.createElement('button');shareButton.className='ghost';shareButton.textContent='שתף תמונה פרטית שלי';shareButton.onclick=()=>{
@@ -181,9 +182,10 @@ let lastTyping=0;$('#messageInput').addEventListener('input',()=>{if(state.activ
 $('#roomPhotoInput').onchange=async()=>{const file=$('#roomPhotoInput').files[0];if(!file||state.active.type!=='room')return;const form=new FormData();form.append('file',file);const response=await fetch('/api/photos?visibility=public',{method:'POST',headers:authHeaders(),body:form});if(response.ok){const photo=await response.json();send({type:'room_message',room_id:state.active.id,text:$('#messageInput').value.trim(),photo_id:photo.id});$('#messageInput').value='';}else toast('העלאת התמונה נכשלה');$('#roomPhotoInput').value='';};
 $('#contactCardBtn').onclick=()=>{if(state.active.type!=='dm'){toast('כרטיס קשר נשלח בשיחה פרטית');return;}const kind=prompt('סוג: phone, whatsapp, telegram, email, website');if(!['phone','whatsapp','telegram','email','website'].includes(kind))return;const value=prompt('פרט הקשר');if(value)send({type:'dm',identity_id:state.active.id,contact_card:{kind,value}});};
 $('#userSearch').oninput=renderUsers; $('#userSort').onchange=renderUsers;
+$('#worldFilter').onchange=renderUsers;
 $('#settingsBtn').onclick=()=>openModal('settingsModal');
 $('#dmPolicy').onchange=()=>send({type:'profile_update',dm_policy:$('#dmPolicy').value});
-$('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value});closeModal('settingsModal');};
+$('#saveProfileBtn').onclick=()=>{send({type:'profile_update',description:$('#profileDescription').value,visible_to:$('#visibleTo').value,worlds:[...document.querySelectorAll('[name=world]:checked')].map(el=>el.value)});closeModal('settingsModal');};
 $('#uploadPhotoBtn').onclick=async()=>{const file=$('#photoUpload').files[0];if(!file)return;const form=new FormData();form.append('file',file);const result=await fetch('/api/photos?visibility='+$('#photoVisibility').value,{method:'POST',headers:authHeaders(),body:form});toast(result.ok?'התמונה עלתה':'העלאה נכשלה');if(result.ok)showPhotos(state.self.identity_id,'myPhotos');};
 $('#settingsBtn').onclick=()=>{openModal('settingsModal');if(state.self)showPhotos(state.self.identity_id,'myPhotos');};
 $('#dndBtn').onclick=()=>{state.dnd=!state.dnd;$('#dndBtn').textContent=`נא לא להפריע: ${state.dnd?'פעיל':'כבוי'}`;send({type:'profile_update',dnd:state.dnd});};

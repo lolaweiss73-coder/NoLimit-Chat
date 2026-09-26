@@ -123,3 +123,18 @@ def test_private_photo_only_visible_after_grant():
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+viewer_token}).status_code == 404
     assert client.post(f'/api/photos/{photo_id}/share/{viewer_id}',headers={'Authorization':'Bearer '+owner_token}).status_code == 200
     assert client.get('/api/photos/'+photo_id,headers={'Authorization':'Bearer '+viewer_token}).status_code == 200
+
+def test_visibility_and_distinct_worlds():
+    with client.websocket_connect('/ws') as hidden:
+        hidden.receive_json()
+        hidden.send_json({'type':'hello','profile':{'nickname':'נסתרת','age':30,'gender':'female'}})
+        while (reply := hidden.receive_json())['type'] != 'bootstrap': pass
+        hidden_id = reply['self']['client_id']
+        hidden.send_json({'type':'profile_update','visible_to':'female','worlds':['kinky','soteh']})
+        while (reply := hidden.receive_json())['type'] != 'presence': pass
+        assert app.hub.profiles[hidden_id]['worlds'] == ['kinky','soteh']
+        with client.websocket_connect('/ws') as male:
+            male.receive_json()
+            male.send_json({'type':'hello','profile':{'nickname':'צופה','age':30,'gender':'male'}})
+            while (reply := male.receive_json())['type'] != 'bootstrap': pass
+            assert all(u['client_id'] != hidden_id for u in reply['users'])
