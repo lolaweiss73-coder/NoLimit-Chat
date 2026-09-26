@@ -530,7 +530,7 @@ async def service_worker() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"ok": True, "online": len(hub.clients), "rooms": len(hub.room_snapshot())})
+    return JSONResponse({"ok": True, "online": len(hub.clients), "rooms": len(hub.room_snapshot()), "durable_storage_configured": bool(os.environ.get("CHAT_DATA_DIR")), "morin_configured": bool(os.environ.get("OPENROUTER_API_KEY") and os.environ.get("MORIN_MODEL")), "youth_enabled": os.environ.get("YOUTH_ENABLED")=="1"})
 
 
 @app.get("/api/youth/status")

@@ -22,6 +22,8 @@ def test_health():
     body = r.json()
     assert body['ok'] is True
     assert body['rooms'] >= 3
+    assert body['youth_enabled'] is False
+    assert body['durable_storage_configured'] is False
 
 def test_home():
     r = client.get('/')

@@ -71,6 +71,9 @@ The youth text forum is disabled by default. `YOUTH_ENABLED=1` exposes `/youth` 
 - Health check: `/api/health`
 - Free Render filesystem is ephemeral. It is suitable only for disposable testing. Set `CHAT_DATA_DIR` to durable storage before real users join; otherwise accounts, messages, photos, rooms and reports can disappear on redeploy or restart.
 
+## Deployment gate
+The `/api/health` response reports whether a data directory and Morin provider have been configured. A configured directory does not prove the mounted volume survives redeploys: verify that by creating a disposable account and image, redeploying, and checking both afterward. Keep `YOUTH_ENABLED` unset until staffed moderation and stronger age safeguards have been verified. Set a strong `CHAT_ADMIN_TOKEN` and verify the reports queue before admitting users. The first public deployment should be limited to supervised testing; the code has not been audited for production use.
+
 
 ## One-click staging deploy
 [Deploy this repository on Render](https://render.com/deploy?repo=https://github.com/lolaweiss73-coder/NoLimit-Chat)
