@@ -10,6 +10,7 @@ import sqlite3
 import time
 import uuid
 from collections import defaultdict
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,11 @@ def init_db() -> None:
         if column not in {entry[1] for entry in con.execute("PRAGMA table_info(identities)")}:
             con.execute(f"ALTER TABLE identities ADD COLUMN {column} {ddl}")
     con.execute("CREATE TABLE IF NOT EXISTS identity_blocks (blocker_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY(blocker_id,blocked_id))")
+    con.execute("CREATE TABLE IF NOT EXISTS moderation_actions (id TEXT PRIMARY KEY, identity_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL)")
+    if "reporter_identity" not in {column[1] for column in con.execute("PRAGMA table_info(reports)")}:
+        con.execute("ALTER TABLE reports ADD COLUMN reporter_identity TEXT")
+        con.execute("ALTER TABLE reports ADD COLUMN target_identity TEXT")
+        con.execute("ALTER TABLE reports ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
     con.execute("CREATE TABLE IF NOT EXISTS friendships (requester_id TEXT NOT NULL, recipient_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, PRIMARY KEY(requester_id,recipient_id))")
     con.execute("CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, visibility TEXT NOT NULL, created_at REAL NOT NULL)")
     con.execute("CREATE TABLE IF NOT EXISTS photo_grants (photo_id TEXT NOT NULL, recipient_id TEXT NOT NULL, PRIMARY KEY(photo_id,recipient_id))")
@@ -108,6 +114,17 @@ class Hub:
         self.room_members: dict[str, set[str]] = defaultdict(set)
         self.blocked: dict[str, set[str]] = defaultdict(set)
         self.lock = asyncio.Lock()
+        self.message_times: dict[str, deque[float]] = defaultdict(deque)
+
+    def allow_message(self, client_id: str) -> bool:
+        now = time.monotonic()
+        recent = self.message_times[client_id]
+        while recent and recent[0] < now - 10:
+            recent.popleft()
+        if len(recent) >= 20:
+            return False
+        recent.append(now)
+        return True
 
     async def send(self, client_id: str, payload: dict[str, Any]) -> None:
         ws = self.clients.get(client_id)
@@ -318,8 +335,59 @@ async def health() -> JSONResponse:
     return JSONResponse({"ok": True, "online": len(hub.clients), "rooms": len(hub.room_snapshot())})
 
 
+def require_admin(authorization: str | None) -> None:
+    secret = os.environ.get("CHAT_ADMIN_TOKEN", "")
+    if not secret:
+        raise HTTPException(503, "Admin access is not configured")
+    supplied = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") else ""
+    if not secrets.compare_digest(supplied, secret):
+        raise HTTPException(403, "Forbidden")
+
+
+@app.get("/api/admin/reports")
+async def admin_reports(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    con = db()
+    rows = con.execute("SELECT id,reporter_identity,target_identity,reason,details,status,created_at FROM reports ORDER BY created_at DESC LIMIT 200").fetchall()
+    con.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/admin/reports/{report_id}/review")
+async def review_report(report_id: str, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    con = db()
+    updated = con.execute("UPDATE reports SET status='reviewed' WHERE id=?",(report_id,)).rowcount
+    con.commit(); con.close()
+    if not updated: raise HTTPException(404, "Report not found")
+    return {"ok":True}
+
+
+@app.post("/api/admin/reports/{report_id}/ban")
+async def ban_reported_identity(report_id: str, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    con = db()
+    report = con.execute("SELECT target_identity,reason FROM reports WHERE id=?",(report_id,)).fetchone()
+    if not report or not report["target_identity"]:
+        con.close(); raise HTTPException(404,"Report target unavailable")
+    con.execute("INSERT INTO moderation_actions (id,identity_id,action,reason,created_at) VALUES (?,?,?,?,?)",(str(uuid.uuid4()),report["target_identity"],"ban",report["reason"],time.time()))
+    con.execute("UPDATE reports SET status='reviewed' WHERE id=?",(report_id,))
+    con.commit();con.close()
+    target_client = hub.identity_clients.get(report["target_identity"])
+    if target_client:
+        await hub.clients[target_client].close(code=1008)
+    return {"ok":True}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    origin = ws.headers.get("origin")
+    if origin:
+        from urllib.parse import urlsplit
+        requested = urlsplit(origin)
+        if requested.netloc != ws.headers.get("host") or requested.scheme not in {"http","https"}:
+            await ws.close(code=1008)
+            return
     await ws.accept()
     client_id = str(uuid.uuid4())
     async with hub.lock:
@@ -329,6 +397,12 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_json()
+            if not isinstance(data, dict):
+                await hub.send(client_id,{"type":"error","message":"הודעה לא תקינה"})
+                continue
+            if len(json.dumps(data,ensure_ascii=False)) > 16384:
+                await hub.send(client_id,{"type":"error","message":"ההודעה ארוכה מדי"})
+                continue
             mtype = data.get("type")
 
             if mtype == "hello":
@@ -360,6 +434,12 @@ async def websocket_endpoint(ws: WebSocket):
                     con.execute("INSERT INTO identities (id,token_hash,nickname,age,gender,dm_policy,created_at) VALUES (?,?,?,?,?,?,?)",(identity_id,hashlib.sha256(token.encode()).hexdigest(),nickname,age,gender,policy,time.time()))
                     con.commit()
                 con.close()
+                check = db()
+                banned = check.execute("SELECT 1 FROM moderation_actions WHERE identity_id=? AND action='ban'",(identity_id,)).fetchone()
+                check.close()
+                if banned:
+                    await hub.send(client_id,{"type":"error","message":"החשבון מוגבל"})
+                    continue
                 clean = {
                     "identity_id": identity_id,
                     "description": identity["description"] if identity else "",
@@ -397,6 +477,10 @@ async def websocket_endpoint(ws: WebSocket):
                 await hub.send(client_id, {"type": "error", "message": "יש להתחבר קודם"})
                 continue
 
+            if mtype in {"room_message","dm","create_room","friend_request","report"} and not hub.allow_message(client_id):
+                await hub.send(client_id,{"type":"error","message":"נשלחו יותר מדי פעולות בזמן קצר"})
+                continue
+
             if mtype == "profile_update":
                 p = hub.profiles[client_id]
                 for key in ("interested_in", "relationship_status", "region", "dm_policy"):
@@ -425,7 +509,8 @@ async def websocket_endpoint(ws: WebSocket):
                 con = db()
                 target = con.execute("SELECT id FROM identities WHERE id=?",(target_identity,)).fetchone()
                 blocked = con.execute("SELECT 1 FROM identity_blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)",(sender_identity,target_identity,target_identity,sender_identity)).fetchone()
-                if target and not blocked:
+                reciprocal = con.execute("SELECT 1 FROM friendships WHERE requester_id=? AND recipient_id=? AND status!='rejected'",(target_identity,sender_identity)).fetchone()
+                if target and not blocked and not reciprocal:
                     con.execute("INSERT OR IGNORE INTO friendships (requester_id,recipient_id,status,created_at) VALUES (?,?,?,?)",(sender_identity,target_identity,"pending",time.time()))
                     con.commit()
                 con.close()
@@ -573,6 +658,9 @@ async def websocket_endpoint(ws: WebSocket):
                     continue
                 is_private = bool(raw.get("is_private", False))
                 password = str(raw.get("password", ""))[:100] if is_private else ""
+                if is_private and not password:
+                    await hub.send(client_id,{"type":"error","message":"חדר פרטי דורש סיסמה"})
+                    continue
                 con = db()
                 con.execute(
                     "INSERT INTO rooms (id,name,description,is_private,password,allowed_gender,min_age,max_age,region,relationship_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -611,12 +699,15 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif mtype == "report":
                 target_id = str(data.get("target_id", ""))
+                if target_id not in hub.profiles or target_id == client_id:
+                    await hub.send(client_id,{"type":"error","message":"משתמש לדיווח לא נמצא"})
+                    continue
                 reason = str(data.get("reason", "other"))[:80]
                 details = str(data.get("details", ""))[:1000]
                 con = db()
                 con.execute(
-                    "INSERT INTO reports (id,reporter_id,target_id,reason,details,created_at) VALUES (?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), client_id, target_id, reason, details, time.time()),
+                    "INSERT INTO reports (id,reporter_id,target_id,reason,details,created_at,reporter_identity,target_identity) VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), client_id, target_id, reason, details, time.time(),hub.identity_for(client_id),hub.identity_for(target_id)),
                 )
                 con.commit()
                 con.close()
@@ -634,6 +725,7 @@ async def websocket_endpoint(ws: WebSocket):
             for members in hub.room_members.values():
                 members.discard(client_id)
             hub.blocked.pop(client_id, None)
+            hub.message_times.pop(client_id, None)
             for s in hub.blocked.values():
                 s.discard(client_id)
         await hub.broadcast_presence()

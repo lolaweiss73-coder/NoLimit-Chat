@@ -53,6 +53,9 @@ Set `CHAT_DATA_DIR` to a mounted persistent directory before accepting real user
 
 Run `python backup_data.py --data-dir /path/to/persistent-data --output /safe/offsite/backup.zip` to create a consistent SQLite snapshot and archive its photos. Backups contain private messages and images; store them securely outside the application server. To restore while the service is stopped, extract `chat.db` and `uploads/` into an empty `CHAT_DATA_DIR` and restart. Test restoration before relying on backups.
 
+## Moderation access
+Set a long random `CHAT_ADMIN_TOKEN` in the server environment. An operator can read pending reports with `GET /api/admin/reports`, mark one reviewed with `POST /api/admin/reports/{id}/review`, or ban its target identity with `POST /api/admin/reports/{id}/ban`. Send `Authorization: Bearer <token>` in each request. These actions require human review. Keep the token out of the frontend and repository. This API is a limited operator interface, not a complete moderation dashboard.
+
 
 ## Render free deployment
 - Service type: Web Service

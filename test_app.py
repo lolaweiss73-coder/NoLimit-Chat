@@ -33,6 +33,18 @@ def test_service_worker_does_not_cache_private_api():
     assert "CORE.includes(url.pathname)" in script
     assert "caches.delete(key)" in script
 
+def test_reports_require_admin_token(monkeypatch):
+    monkeypatch.delenv('CHAT_ADMIN_TOKEN',raising=False)
+    assert client.get('/api/admin/reports').status_code==503
+    monkeypatch.setenv('CHAT_ADMIN_TOKEN','example-test-secret')
+    assert client.get('/api/admin/reports').status_code==403
+    assert client.get('/api/admin/reports',headers={'Authorization':'Bearer example-test-secret'}).json()==[]
+
+def test_message_rate_limit():
+    for _ in range(20): assert app.hub.allow_message('test-client')
+    assert not app.hub.allow_message('test-client')
+    app.hub.message_times.pop('test-client')
+
 def test_private_room_rejects_wrong_password():
     import time
     con = app.db()
