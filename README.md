@@ -56,3 +56,7 @@ Before public launch, add TLS, reverse proxy, rate limiting, abuse prevention, p
 - Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
 - Health check: `/api/health`
 - Free Render filesystem is ephemeral. This MVP can run there for testing; room/report SQLite persistence should move to a managed DB before production.
+
+
+## One-click staging deploy
+[Deploy this repository on Render](https://render.com/deploy?repo=https://github.com/lolaweiss73-coder/NoLimit-Chat)
