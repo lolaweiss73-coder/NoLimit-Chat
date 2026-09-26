@@ -30,3 +30,23 @@ def test_ws_join_and_room_message():
         while msg['type'] != 'room_message':
             msg = ws.receive_json()
         assert msg['message']['text'] == 'שלום'
+
+def test_dm_gender_policy_and_invalid_age():
+    with client.websocket_connect('/ws') as receiver, client.websocket_connect('/ws') as sender:
+        receiver_id = receiver.receive_json()['client_id']
+        sender.receive_json()
+        receiver.send_json({'type':'hello','profile':{'nickname':'מקבלת','age':30,'gender':'female','dm_policy':'female'}})
+        while receiver.receive_json()['type'] != 'bootstrap':
+            pass
+        sender.send_json({'type':'hello','profile':{'nickname':'שולח','age':'invalid','gender':'male'}})
+        while sender.receive_json()['type'] != 'error':
+            pass
+        sender.send_json({'type':'hello','profile':{'nickname':'שולח','age':30,'gender':'male'}})
+        while sender.receive_json()['type'] != 'bootstrap':
+            pass
+        sender.send_json({'type':'dm','target_id':receiver_id,'text':'שלום'})
+        while True:
+            response = sender.receive_json()
+            if response['type'] == 'error':
+                assert 'נשים בלבד' in response['message']
+                break
