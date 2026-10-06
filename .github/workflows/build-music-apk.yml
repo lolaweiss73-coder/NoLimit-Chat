@@ -1,4 +1,4 @@
-name: Build Music Without Limits APK
+name: Build Music Without Limits Release APK
 
 on:
   push:
@@ -33,16 +33,46 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
+      - name: Generate release signing key
+        id: signing
+        shell: bash
+        run: |
+          PASS=$(openssl rand -hex 32)
+          echo "::add-mask::$PASS"
+          keytool -genkeypair -v             -keystore android-music/app/release.jks             -alias musicwithoutlimits             -keyalg RSA -keysize 4096 -validity 10000             -storepass "$PASS" -keypass "$PASS"             -dname "CN=Music Without Limits, OU=Android, O=Avi Weiss, L=Bat Yam, C=IL"
+          printf '%s' "$PASS" > signing-password.txt
+          echo "password=$PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK
         working-directory: android-music
-        run: gradle assembleDebug --stacktrace
+        env:
+          KEYSTORE_FILE: release.jks
+          KEYSTORE_PASSWORD: ${{ steps.signing.outputs.password }}
+          KEY_ALIAS: musicwithoutlimits
+          KEY_PASSWORD: ${{ steps.signing.outputs.password }}
+        run: gradle assembleRelease --stacktrace
 
-      - name: Rename APK
-        run: cp android-music/app/build/outputs/apk/debug/app-debug.apk Music-Without-Limits-2.0.apk
+      - name: Rename release APK
+        run: cp android-music/app/build/outputs/apk/release/app-release.apk Music-Without-Limits-2.0-release.apk
 
-      - name: Upload APK
+      - name: Package signing backup
+        run: |
+          mkdir signing-backup
+          cp android-music/app/release.jks signing-backup/Music-Without-Limits-release.jks
+          cp signing-password.txt signing-backup/signing-password.txt
+          printf '%s\n' 'Alias: musicwithoutlimits' > signing-backup/README.txt
+          printf '%s\n' 'Keep these files safe. Future releases must use this keystore.' >> signing-backup/README.txt
+
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: Music-Without-Limits-2.0
-          path: Music-Without-Limits-2.0.apk
+          name: Music-Without-Limits-2.0-release
+          path: Music-Without-Limits-2.0-release.apk
+          if-no-files-found: error
+
+      - name: Upload signing backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: Music-Without-Limits-signing-backup
+          path: signing-backup/
           if-no-files-found: error
